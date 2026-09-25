@@ -1,0 +1,32 @@
+{
+  "name": "jarvis",
+  "productName": "Jarvis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jarvis: an AI operating layer that runs your organisations and personal projects with agent teams.",
+  "type": "module",
+  "main": "app/main.cjs",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "service": "node --disable-warning=ExperimentalWarning service/server.js",
+    "set-password": "node --disable-warning=ExperimentalWarning service/cli.js set-password",
+    "build:ui": "vite build",
+    "app": "electron .",
+    "start": "vite build && electron .",
+    "icons": "node scripts/make-icons.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "vosk-browser": "^0.0.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.4.5",
+    "vite": "^8.3.1"
+  }
+}
