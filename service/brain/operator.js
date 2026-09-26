@@ -14,6 +14,7 @@ import { syncKnowledge } from '../connectors/obsidian.js';
 import { readLeads } from './tools.js';
 import { approvalSentence } from './policy.js';
 import { whatsappConnected } from '../connectors/whatsapp.js';
+import { waitingForConnectors } from '../outbox.js';
 
 const runningFor = new Set();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -44,8 +45,11 @@ export function situation(orgId) {
   if (done.length) lines.push('FINISHED IN THE LAST 24H:', ...done.map((t) => `- ${t.agent}: ${t.title} [${t.verify_status ?? 'done'}] ${t.summary ? `— ${t.summary.slice(0, 160)}` : ''}`));
   const failed = all(`SELECT title, error FROM tasks WHERE org_id = ? AND status = 'failed' AND finished_at > ?`, orgId, since);
   if (failed.length) lines.push('FAILED:', ...failed.map((t) => `- ${t.title}: ${String(t.error).slice(0, 160)}`));
-  const pending = all(`SELECT kind, summary, route FROM approvals WHERE org_id = ? AND status = 'pending'`, orgId);
-  lines.push(`WAITING FOR APPROVAL: ${pending.length}${pending.length ? '\n' + pending.map((a) => `- [${a.kind}→${a.route ?? 'owner'}] ${a.summary}`).join('\n') : ''}`);
+  const pending = all(`SELECT kind, summary FROM approvals WHERE org_id = ? AND status = 'pending'`, orgId);
+  lines.push(`MONEY WAITING FOR THE OWNER: ${pending.length}${pending.length ? '\n' + pending.map((a) => `- [${a.kind}] ${a.summary}`).join('\n') : ''}`);
+  const inReview = one(`SELECT COUNT(*) AS n FROM approvals WHERE org_id = ? AND status = 'review'`, orgId).n;
+  const waiting = waitingForConnectors(orgId);
+  lines.push(`MESSAGES: ${inReview} in review (released when their missions are delivered)${waiting.length ? '; waiting for a connector: ' + waiting.map((w) => `${w.label} ${w.count}`).join(', ') + ' (the owner has been asked to add the key; they send by themselves then)' : ''}`);
   const sent = one('SELECT COUNT(*) AS n FROM sent_emails WHERE org_id = ? AND sent_at > ?', orgId, since).n;
   const replies = all(`SELECT r.from_email, r.subject, substr(r.body, 1, 200) AS body FROM replies r JOIN sent_emails s ON s.id = r.sent_email_id WHERE s.org_id = ? AND r.received_at > ?`, orgId, since);
   lines.push(`OUTREACH LAST 24H: ${sent} sent, ${replies.length} replies${replies.length ? '\n' + replies.map((r) => `- ${r.from_email}: ${r.body}`).join('\n') : ''}`);
@@ -79,7 +83,7 @@ YOUR JOB AS OPERATOR:
 5. Update goal progress with update_goal where the facts justify it.
 6. Write journal/plan-${today()}.md (overwrite if it exists): today's objectives, the missions you created (with ids), risks, and what the owner should look at. Keep it under 300 words.
 7. Finish with a short spoken-style summary for the owner (3 to 5 sentences): what the organisation is doing today and what needs their attention. No questions.
-Rules: never ask the owner what to do. ${approvalSentence(getSetting('approval_level', 'payments'))} You run in a loop: as soon as missions are delivered you are woken again, so always leave the teams with the next concrete work. If connectors are missing, work around it (leads still go to the CRM; messages still get proposed and wait in the Outbox).`;
+Rules: never ask the owner what to do. ${approvalSentence(getSetting('approval_level', 'payments'))} You run in a loop: as soon as missions are delivered you are woken again, so always leave the teams with the next concrete work. Messages wait in the Outbox while a connector is missing and go out by themselves once the owner adds the key: never plan manual sending (send sheets, click-to-send links, "the owner sends by hand"), never ask the owner to send anything, and do not propose the same recipients again. Use the time to build what will be delivered after the first replies (offers, templates, products, follow-up sequences) and to widen the pipeline.`;
 }
 
 export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) {

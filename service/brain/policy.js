@@ -14,11 +14,17 @@ export const DECLINE_TEXT =
   'and first contacts). Decide this yourself using the organisation profile, the goals and your ' +
   'own judgement, write your assumption in your journal, and proceed. If a piece of information is missing, find it or make the safest reasonable assumption.';
 
+export const OTHER_TEXT =
+  'There is no to-do list for the owner. Actions you can perform with your own tools (a web form, a directory listing, a document) you perform yourself, ' +
+  'for example with the browser. If it needs a service Jarvis is not connected to, write it under "Needs a connector" in your journal and move on. ' +
+  'Messages to people go through kind email, proposal or whatsapp, never "other".';
+export const CALL_TEXT = 'Jarvis cannot place phone calls. Reach the person on WhatsApp or by email instead.';
+
 // One sentence for prompts and the HUD describing what the owner currently approves.
 export function approvalSentence(level = 'payments') {
   if (level === 'first_contact') return 'The owner approves money, contracts, deleting data and the first message to a new contact; everything else is automatic.';
   if (level === 'money') return 'The owner approves money, contracts and deleting data; every message is sent automatically.';
-  return 'The owner approves payments and purchases only; everything else, including first contacts, is sent or done automatically.';
+  return 'The owner approves payments and purchases only; every message is reviewed by Jarvis when the mission is delivered and then sent automatically.';
 }
 
 /**
@@ -42,11 +48,9 @@ export function routeAction({ kind, summary = '', contactHasReplied = false, lea
     if (level === 'payments') return { route: 'auto', reason: 'The owner lets Jarvis handle contracts and deletions itself.' };
     return { route: 'owner', reason: 'Contracts and deletions come to the owner.' };
   }
-  // "other" is for real actions Jarvis cannot carry out itself (a form to submit, a call to place), never for questions.
-  if (kind === 'other') {
-    if (looksLikeHandback(summary) || /\?\s*$/.test(summary)) return { route: 'decline', reason: DECLINE_TEXT };
-    return { route: 'owner', reason: 'An action outside Jarvis’s tools; the owner carries it out.' };
-  }
+  // Nothing is queued for the owner to do by hand: agents act with their own tools, and Jarvis has no phone.
+  if (kind === 'other') return { route: 'decline', reason: looksLikeHandback(summary) || /\?\s*$/.test(summary) ? DECLINE_TEXT : OTHER_TEXT };
+  if (kind === 'call') return { route: 'decline', reason: CALL_TEXT };
   if (OUTGOING.has(kind)) {
     if (!hasRecipient) return { route: 'decline', reason: 'An outgoing message needs a real recipient you actually found. Do not guess addresses.' };
     if (contactHasReplied) return { route: 'auto', reason: 'The contact has already replied, so the conversation continues without approval.' };

@@ -19,7 +19,7 @@ import { clampPriority } from './protocol.js';
 import { testHubspot } from './connectors/hubspot.js';
 import { testGmail } from './connectors/gmail.js';
 import { testWhatsapp, verifyToken, signatureValid, whatsappConnected, whatsappDailyLimit, whatsappSentToday } from './connectors/whatsapp.js';
-import { deliverQueued, dailyLimit, sentToday, receiveWhatsapp, adoptPendingWhatsapp } from './outbox.js';
+import { deliverQueued, dailyLimit, sentToday, receiveWhatsapp, migratePendingActions, requeueForConnector, waitingForConnectors } from './outbox.js';
 import { orgDir, suggestOrgFolder, moveOrgWorkspace, ensureWorkspace } from './brain/workspace.js';
 import { LEVELS, approvalSentence } from './brain/policy.js';
 import { defaultVault, initVault, syncMinds, writeBriefing } from './connectors/obsidian.js';
@@ -133,6 +133,9 @@ route('GET', '/api/overview', (req, res, ctx) => {
     today: one(`SELECT COUNT(*) AS runs, SUM(outcome = 'ok') AS ok FROM runs WHERE started_at >= ?`, dayStart),
     pendingTotal: one(`SELECT COUNT(*) AS n FROM approvals WHERE status = 'pending'`).n,
     needsYou,
+    connectorsNeeded: waitingForConnectors(orgId),
+    inReview: one(`SELECT COUNT(*) AS n FROM approvals WHERE status = 'review' AND ${scopeSql}`, ...scopeArgs).n,
+    sentToday: one(`SELECT COUNT(*) AS n FROM approvals WHERE delivery = 'sent' AND sent_at >= ? AND ${scopeSql}`, dayStart, ...scopeArgs).n,
     lastOutput: last,
     queued: one(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'queued' AND kind = 'mission' AND ${scopeSql}`, ...scopeArgs).n,
     running: one(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'running' AND kind IN ('mission','operator') AND ${scopeSql}`, ...scopeArgs).n,
@@ -628,6 +631,7 @@ route('POST', '/api/tasks/:id/retry', (req, res, ctx) => {
 // ---------- approvals & outbox ----------
 route('GET', '/api/approvals', (req, res, ctx) => {
   const status = ctx.query.get('status') || 'pending';
+  const delivery = ctx.query.get('delivery') || null;
   const orgId = ctx.query.get('org') ? id(ctx.query.get('org')) : null;
   send(
     res,
@@ -635,10 +639,12 @@ route('GET', '/api/approvals', (req, res, ctx) => {
     all(
       `SELECT ap.*, t.title AS task_title, a.name AS agent_name, o.name AS org_name, tm.name AS team_name FROM approvals ap
        LEFT JOIN tasks t ON t.id = ap.task_id LEFT JOIN agents a ON a.id = t.agent_id LEFT JOIN orgs o ON o.id = ap.org_id
-       LEFT JOIN teams tm ON tm.id = ap.team_id WHERE ap.status = ? AND (? IS NULL OR ap.org_id = ?) ORDER BY ap.id DESC LIMIT 200`,
+       LEFT JOIN teams tm ON tm.id = ap.team_id WHERE ap.status = ? AND (? IS NULL OR ap.org_id = ?) AND (? IS NULL OR ap.delivery = ?) ORDER BY ap.id DESC LIMIT 200`,
       status,
       orgId,
       orgId,
+      delivery,
+      delivery,
     ).map(parseApproval),
   );
 });
@@ -887,10 +893,12 @@ route('PUT', '/api/connectors/whatsapp', async (req, res) => {
     if (typeof b.appSecret === 'string' && b.appSecret.trim()) setSetting('whatsapp_app_secret', b.appSecret.trim().slice(0, 200));
     log('info', `WhatsApp connected (${r.number})`);
     notify('settings');
-    const moved = adoptPendingWhatsapp();
+    migratePendingActions();
+    const sending = requeueForConnector('whatsapp');
     deliverQueued().catch(() => {});
-    send(res, 200, { ok: true, message: moved ? `${r.message}. ${moved} waiting first contact(s) are now sending on WhatsApp.` : r.message });
+    send(res, 200, { ok: true, message: sending ? `${r.message}. ${sending} waiting message(s) are now sending on WhatsApp.` : r.message });
   } catch (err) {
+    log('warn', `WhatsApp connection failed: ${err.message}`);
     throw new HttpError(400, err.message);
   }
 });
@@ -974,15 +982,23 @@ route('PUT', '/api/connectors/gmail', async (req, res) => {
   const address = text(b.address, 200, 'Gmail address').toLowerCase();
   const password = text(b.appPassword, 100, 'App Password');
   try {
+    // Google only accepts App Passwords here: 16 letters, often shown in groups of four.
+    const compact = password.replace(/\s+/g, '');
+    if (!/^[a-z]{16}$/i.test(compact)) {
+      log('warn', `Gmail connection refused for ${address}: the password was not a 16-letter App Password`);
+      throw new Error('That is not an App Password. Google does not accept your normal Gmail password here. With 2-Step Verification on, open myaccount.google.com/apppasswords, create one named "Jarvis" and paste the 16 letters it shows.');
+    }
     const message = await testGmail(address, password);
     setSetting('gmail_address', address);
     setSetting('gmail_app_password', password);
     if (typeof b.senderName === 'string') setSetting('gmail_sender_name', b.senderName.trim().slice(0, 80));
     log('info', `Gmail connected (${address})`);
     notify('settings');
+    const sending = requeueForConnector('gmail');
     deliverQueued().catch(() => {});
-    send(res, 200, { ok: true, message });
+    send(res, 200, { ok: true, message: sending ? `${message}. ${sending} waiting message(s) are now sending.` : message });
   } catch (err) {
+    if (!/not an App Password/.test(err.message)) log('warn', `Gmail connection failed for ${address}: ${err.message}`);
     throw new HttpError(400, err.message);
   }
 });

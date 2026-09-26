@@ -3,7 +3,7 @@ import { api, useData } from '../api.js';
 import Reactor from '../components/Reactor.jsx';
 import { Bar, Icon, Pill, Modal, toast, ago } from '../components/ui.jsx';
 import { go, useAsk } from '../App.jsx';
-import { ApprovalCard } from './Approvals.jsx';
+import { ApprovalCard, ConnectorNotices } from './Approvals.jsx';
 
 const ENGINE_NAMES = { claude: 'Claude Code', codex: 'Codex', api: 'API backup' };
 
@@ -127,18 +127,23 @@ export function OrgHome({ ctx }) {
       </section>
 
       <aside className="col" style={{ width: 360, padding: '18px 18px', gap: 12, overflow: 'auto' }}>
-        <div className="panel warn col" style={{ gap: 8 }}>
+        <div className={`panel col ${o.needsYou.length || o.connectorsNeeded?.length ? 'warn' : ''}`} style={{ gap: 8 }}>
           <div className="row between">
-            <span className="label warn">▶ Needs you</span>
-            <span className="mono" style={{ color: 'var(--warn)' }}>{o.needsYou.length}</span>
+            <span className={`label ${o.needsYou.length || o.connectorsNeeded?.length ? 'warn' : ''}`}>▶ Needs you</span>
+            <span className="mono" style={{ color: 'var(--warn)' }}>{o.needsYou.length + (o.connectorsNeeded?.length ?? 0) || ''}</span>
           </div>
-          {o.needsYou.slice(0, 4).map((a) => (
+          <ConnectorNotices items={o.connectorsNeeded} compact />
+          {o.needsYou.slice(0, 3).map((a) => (
             <ApprovalCard key={a.id} a={a} compact />
           ))}
-          {!o.needsYou.length && <div className="faint small">Nothing is waiting for you.</div>}
-          {o.needsYou.length > 4 && (
+          {!o.needsYou.length && !o.connectorsNeeded?.length && (
+            <div className="faint small">
+              Nothing is waiting for you.{o.inReview ? ` ${o.inReview} message(s) are in Jarvis’s review.` : ''}{o.sentToday ? ` ${o.sentToday} sent today.` : ''}
+            </div>
+          )}
+          {o.needsYou.length > 3 && (
             <a href="#/approvals" className="mono small" style={{ color: 'var(--warn)' }}>
-              REVIEW ALL ›
+              SEE ALL ›
             </a>
           )}
         </div>

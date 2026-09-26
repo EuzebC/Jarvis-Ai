@@ -13,35 +13,83 @@ const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 export const dailyLimit = () => Number(getSetting('gmail_daily_limit', '20'));
 export const sentToday = () => one('SELECT COUNT(*) AS n FROM sent_emails WHERE sent_at > ?', now() - 86_400_000).n;
 
-// Called right after the owner (or a trusted leader) approves something.
+export const CONNECTOR_LABEL = { gmail: 'Gmail', whatsapp: 'WhatsApp' };
+
+// Called when something becomes approved (by policy, by Jarvis's review, or by the owner for money).
 export function routeApproved(approval) {
   const d = JSON.parse(approval.payload || '{}');
   let delivery = 'manual';
+  let connector = null;
   let note;
-  if (!SENDABLE.includes(approval.kind)) note = 'Approved. This kind of action is carried out by you.';
+  if (!SENDABLE.includes(approval.kind)) note = 'Approved. This is carried out by you.';
   else if (approval.kind === 'whatsapp') {
-    if (!whatsappConnected()) note = 'Approved. Connect WhatsApp in Settings to send automatically, or send it from your phone.';
-    else if (isBlocked(approval.org_id, d.to)) {
+    connector = 'whatsapp';
+    if (isBlocked(approval.org_id, d.to)) {
       delivery = 'blocked';
       note = 'Not sent: this number is on the do-not-contact list.';
+    } else if (!whatsappConnected()) {
+      delivery = 'needs_connector';
+      note = 'Ready. Waiting for the WhatsApp connector: add the key in Settings → Connectors and it sends by itself.';
     } else {
       delivery = 'queued';
-      note = whatsappSentToday() >= whatsappDailyLimit() ? `Approved. Daily WhatsApp limit of ${whatsappDailyLimit()} reached; it will send when the limit resets.` : 'Approved. Sending on WhatsApp…';
+      note = whatsappSentToday() >= whatsappDailyLimit() ? `Daily WhatsApp limit of ${whatsappDailyLimit()} reached; it sends when the limit resets.` : 'Sending on WhatsApp…';
+    }
+  } else if (!EMAIL_RE.test(String(d.to ?? ''))) note = 'Approved, but there is no email address, so it cannot be sent.';
+  else {
+    connector = 'gmail';
+    if (isBlocked(approval.org_id, String(d.to).match(EMAIL_RE)[0])) {
+      delivery = 'blocked';
+      note = 'Not sent: this address is on the do-not-contact list.';
+    } else if (!gmailConnected()) {
+      delivery = 'needs_connector';
+      note = 'Ready. Waiting for the Gmail connector: add the App Password in Settings → Connectors and it sends by itself.';
+    } else {
+      delivery = 'queued';
+      note = sentToday() >= dailyLimit() ? `Daily email limit of ${dailyLimit()} reached; it sends when the limit resets.` : 'Sending now…';
     }
   }
-  else if (!EMAIL_RE.test(String(d.to ?? ''))) note = 'Approved, but there is no email address. Copy it and send it another way (contact form, WhatsApp).';
-  else if (isBlocked(approval.org_id, String(d.to).match(EMAIL_RE)[0])) {
-    delivery = 'blocked';
-    note = 'Not sent: this address is on the do-not-contact list.';
-  }
-  else if (!gmailConnected()) note = 'Approved. Connect Gmail in Settings to send automatically, or copy and send it yourself.';
-  else {
-    delivery = 'queued';
-    note = sentToday() >= dailyLimit() ? `Approved. Daily limit of ${dailyLimit()} reached; it will send when the limit resets.` : 'Approved. Sending now…';
-  }
-  run('UPDATE approvals SET delivery = ?, delivery_note = ? WHERE id = ?', delivery, note, approval.id);
+  run('UPDATE approvals SET delivery = ?, delivery_note = ?, connector = ? WHERE id = ?', delivery, note, connector, approval.id);
   if (delivery === 'queued') setImmediate(() => deliverQueued().catch((err) => log('error', `Outbox: ${err.message}`)));
   return note;
+}
+
+// Messages that wait for a connector, per connector (for the HUD and the Operator).
+export const waitingForConnectors = (orgId = null) =>
+  all(`SELECT connector, COUNT(*) AS n FROM approvals WHERE status = 'approved' AND delivery = 'needs_connector' AND (? IS NULL OR org_id = ?) GROUP BY connector`, orgId, orgId).map((r) => ({ connector: r.connector, label: CONNECTOR_LABEL[r.connector] ?? r.connector, count: r.n }));
+
+// When a connector gets connected, everything that waited for it goes out.
+export function requeueForConnector(connector) {
+  const rows = all(`SELECT * FROM approvals WHERE status = 'approved' AND delivery = 'needs_connector' AND connector = ?`, connector);
+  for (const a of rows) routeApproved(a);
+  if (rows.length) {
+    log('info', `${CONNECTOR_LABEL[connector] ?? connector} connected: ${rows.length} waiting message(s) are now sending`);
+    notify('approvals');
+  }
+  return rows.length;
+}
+
+// Brings rows from earlier policies in line with the current one (run at start and after a connector connects).
+export function migratePendingActions() {
+  let n = 0;
+  // First contacts that were queued for the owner to send by hand become WhatsApp messages.
+  for (const a of all(`SELECT * FROM approvals WHERE status = 'pending' AND kind IN ('other', 'call')`)) {
+    const d = JSON.parse(a.payload || '{}');
+    const phone = normalisePhone(d.phone || d.channel || '');
+    if (phone && d.body) {
+      run(`UPDATE approvals SET kind = 'whatsapp', payload = ?, status = 'approved', decided_by = 'policy', note = 'Reviewed with its mission; sends through WhatsApp.', route = 'auto', decided_at = ? WHERE id = ?`, JSON.stringify({ ...d, to: phone }), now(), a.id);
+      routeApproved(one('SELECT * FROM approvals WHERE id = ?', a.id));
+    } else {
+      run(`UPDATE approvals SET status = 'rejected', decided_by = 'policy', note = ?, decided_at = ? WHERE id = ?`, a.kind === 'call' ? 'Jarvis cannot place calls; the team reaches people on WhatsApp or by email.' : 'No owner to-do list: agents carry out actions with their own tools.', now(), a.id);
+    }
+    n++;
+  }
+  // Approved messages that were marked "send it yourself" now wait for their connector.
+  for (const a of all(`SELECT * FROM approvals WHERE status = 'approved' AND delivery = 'manual' AND kind IN ('email', 'proposal', 'whatsapp')`)) {
+    routeApproved(a);
+    n++;
+  }
+  if (n) notify('approvals');
+  return n;
 }
 
 const nameAndEmail = (to) => {
@@ -136,30 +184,6 @@ export async function deliverQueued() {
     delivering = false;
     notify('approvals');
   }
-}
-
-// When WhatsApp gets connected, first contacts that were waiting for the owner to send by hand move to the WhatsApp queue.
-export function adoptPendingWhatsapp() {
-  const level = getSetting('approval_level', 'payments');
-  let n = 0;
-  for (const a of all(`SELECT * FROM approvals WHERE status = 'pending' AND kind = 'other'`)) {
-    const d = JSON.parse(a.payload || '{}');
-    const phone = normalisePhone(d.phone || d.channel || '');
-    if (!phone || !d.body || !/whatsapp/i.test(`${a.summary} ${d.channel ?? ''}`)) continue;
-    const payload = JSON.stringify({ ...d, to: phone });
-    if (level === 'first_contact') {
-      run(`UPDATE approvals SET kind = 'whatsapp', payload = ? WHERE id = ?`, payload, a.id);
-    } else {
-      run(`UPDATE approvals SET kind = 'whatsapp', payload = ?, status = 'approved', decided_by = 'policy', note = ?, route = 'auto', decided_at = ? WHERE id = ?`, payload, 'WhatsApp connected: first contacts send automatically.', now(), a.id);
-      routeApproved(one('SELECT * FROM approvals WHERE id = ?', a.id));
-    }
-    n++;
-  }
-  if (n) {
-    log('info', `${n} waiting WhatsApp first contact(s) moved to the WhatsApp outbox`);
-    notify('approvals');
-  }
-  return n;
 }
 
 // A reply (email or WhatsApp) becomes a mission for the team that started the conversation, and wakes the Operator.

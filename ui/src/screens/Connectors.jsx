@@ -5,10 +5,36 @@ import ObsidianCard from './ObsidianCard.jsx';
 import DoNotContact from './DoNotContact.jsx';
 
 const copy = (value, what) => navigator.clipboard?.writeText(value).then(() => toast(`${what} copied`)).catch(() => toast('Could not copy', true));
+const Open = ({ href, children }) => (
+  <a href={href} target="_blank" rel="noreferrer" className="mono small" style={{ color: 'var(--p)', whiteSpace: 'nowrap' }}>
+    {children ?? 'OPEN ↗'}
+  </a>
+);
+// An App Password is 16 letters (Google shows them in groups of four). Anything else is the account password.
+const looksLikeAppPassword = (v) => /^[a-z]{16}$/i.test(String(v).replace(/\s+/g, ''));
+const LINKS = {
+  appPasswords: 'https://myaccount.google.com/apppasswords',
+  twoStep: 'https://myaccount.google.com/signinoptions/two-step-verification',
+  hubspotKeys: 'https://app.hubspot.com/l/private-apps',
+  metaApps: 'https://developers.facebook.com/apps/',
+  systemUsers: 'https://business.facebook.com/settings/system-users',
+  templates: 'https://business.facebook.com/wa/manage/message-templates/',
+  cloudflared: 'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
+};
 
 // Settings → Connectors: HubSpot (CRM), Gmail (sending + replies) and WhatsApp Business.
-export default function Connectors({ orgId = null }) {
+export default function Connectors({ orgId = null, focus = null }) {
   const c = useData('/api/connectors');
+  // Arriving from "add the key" links: scroll to the card and light it up.
+  useEffect(() => {
+    if (!focus || !c.data) return;
+    const el = document.getElementById(`connector-${focus}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('hot');
+    const t = setTimeout(() => el.classList.remove('hot'), 4000);
+    return () => clearTimeout(t);
+  }, [focus, c.data]);
   const [hsKey, setHsKey] = useState('');
   const [gm, setGm] = useState({ address: '', appPassword: '', senderName: '' });
   const [wa, setWa] = useState({ phoneId: '', token: '', appSecret: '' });
@@ -43,7 +69,7 @@ export default function Connectors({ orgId = null }) {
     <section className="col" style={{ gap: 10 }}>
       <span className="label">▶ Connectors</span>
       <div className="grid g2" style={{ alignItems: 'start' }}>
-        <div className="panel col" style={{ gap: 10 }}>
+        <div className="panel col" style={{ gap: 10 }} id="connector-hubspot">
           <div className="row between">
             <div style={{ fontFamily: 'var(--display)', fontWeight: 700, fontSize: 18, letterSpacing: '0.08em' }}>HUBSPOT CRM</div>
             <span className="mono small" style={{ color: d.hubspot.connected ? 'var(--ok)' : 'var(--faint)' }}>{d.hubspot.connected ? '● CONNECTED' : '○ NOT CONNECTED'}</span>
@@ -54,7 +80,9 @@ export default function Connectors({ orgId = null }) {
           <details className="small muted">
             <summary style={{ cursor: 'pointer', color: 'var(--p)' }}>How to get the key</summary>
             <ol style={{ margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.7 }}>
-              <li>In HubSpot open Settings → Integrations → Service Keys (or Development → Keys → Service Keys).</li>
+              <li>
+                In HubSpot open Settings → Integrations → Service Keys (or Development → Keys → Service Keys). <Open href={LINKS.hubspotKeys} />
+              </li>
               <li>Create a key named “Jarvis”.</li>
               <li>Add scopes: crm.objects.contacts.read / write, crm.objects.companies.read / write, crm.objects.deals.read / write.</li>
               <li>Create it, copy the key and paste it below.</li>
@@ -79,7 +107,7 @@ export default function Connectors({ orgId = null }) {
           )}
         </div>
 
-        <div className="panel col" style={{ gap: 10 }}>
+        <div className="panel col" style={{ gap: 10 }} id="connector-gmail">
           <div className="row between">
             <div style={{ fontFamily: 'var(--display)', fontWeight: 700, fontSize: 18, letterSpacing: '0.08em' }}>GMAIL</div>
             <span className="mono small" style={{ color: d.gmail.connected ? 'var(--ok)' : 'var(--faint)' }}>{d.gmail.connected ? `● ${d.gmail.address}` : '○ NOT CONNECTED'}</span>
@@ -89,11 +117,16 @@ export default function Connectors({ orgId = null }) {
             {d.gmail.connected && ` Sent in the last 24 h: ${d.gmail.sentToday} / ${d.gmail.dailyLimit}${d.gmail.queued ? ` · ${d.gmail.queued} waiting` : ''}.`}
           </div>
           <details className="small muted">
-            <summary style={{ cursor: 'pointer', color: 'var(--p)' }}>How to get an App Password</summary>
+            <summary style={{ cursor: 'pointer', color: 'var(--p)' }}>How to get an App Password (your normal Gmail password does not work here)</summary>
             <ol style={{ margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.7 }}>
-              <li>Go to myaccount.google.com → Security and turn on 2-Step Verification.</li>
-              <li>Open myaccount.google.com/apppasswords, create one named “Jarvis”.</li>
-              <li>Copy the 16-character password and paste it below. You can revoke it there any time.</li>
+              <li>
+                Sign in to the Gmail account you want Jarvis to send from, then turn on 2-Step Verification. <Open href={LINKS.twoStep} />
+              </li>
+              <li>
+                Open the App Passwords page, type “Jarvis” as the name and press Create. <Open href={LINKS.appPasswords} />
+              </li>
+              <li>Google shows 16 letters in four groups (like “abcd efgh ijkl mnop”). Copy them into the field below and press Connect. You can revoke it on the same page at any time.</li>
+              <li>If the page says the setting is not available: 2-Step Verification is not fully on yet, or the account is a Google Workspace account whose admin has disabled App Passwords.</li>
             </ol>
           </details>
           <form
@@ -109,11 +142,16 @@ export default function Connectors({ orgId = null }) {
               <input className="input" value={gm.senderName} onChange={(e) => setGm({ ...gm, senderName: e.target.value })} placeholder="Sender name (e.g. Acme Digital)" aria-label="Sender name" />
             </div>
             <div className="row">
-              <input className="input grow" type="password" autoComplete="off" value={gm.appPassword} onChange={(e) => setGm({ ...gm, appPassword: e.target.value })} placeholder={d.gmail.connected ? 'New App Password to replace…' : '16-character App Password'} aria-label="Google App Password" required />
-              <button className="btn primary" disabled={busy === 'gm'}>
+              <input className="input grow" type="password" autoComplete="off" value={gm.appPassword} onChange={(e) => setGm({ ...gm, appPassword: e.target.value })} placeholder={d.gmail.connected ? 'New App Password to replace…' : '16-letter App Password (abcd efgh ijkl mnop)'} aria-label="Google App Password" required />
+              <button className="btn primary" disabled={busy === 'gm' || (gm.appPassword && !looksLikeAppPassword(gm.appPassword))}>
                 {busy === 'gm' ? 'Testing…' : 'Connect'}
               </button>
             </div>
+            {gm.appPassword && !looksLikeAppPassword(gm.appPassword) && (
+              <div className="small" style={{ color: 'var(--warn)', lineHeight: 1.6 }}>
+                This looks like your Gmail account password. Google refuses it for apps like Jarvis. Create a 16-letter App Password and paste that instead. <Open href={LINKS.appPasswords}>OPEN APP PASSWORDS ↗</Open>
+              </div>
+            )}
           </form>
           {d.gmail.connected && (
             <button type="button" className="linkbtn" style={{ alignSelf: 'flex-start', color: 'var(--bad)' }} onClick={() => run('gmx', () => api('DELETE', '/api/connectors/gmail'))}>
@@ -123,7 +161,7 @@ export default function Connectors({ orgId = null }) {
         </div>
       </div>
 
-      <div className="panel col" style={{ gap: 10 }}>
+      <div className="panel col" style={{ gap: 10 }} id="connector-whatsapp">
         <div className="row between">
           <div style={{ fontFamily: 'var(--display)', fontWeight: 700, fontSize: 18, letterSpacing: '0.08em' }}>WHATSAPP BUSINESS</div>
           <span className="mono small" style={{ color: d.whatsapp.connected ? 'var(--ok)' : 'var(--faint)' }}>{d.whatsapp.connected ? `● ${d.whatsapp.number || 'CONNECTED'}` : '○ NOT CONNECTED'}</span>
@@ -135,12 +173,20 @@ export default function Connectors({ orgId = null }) {
         <details className="small muted">
           <summary style={{ cursor: 'pointer', color: 'var(--p)' }}>How to get the Phone number ID and a permanent token</summary>
           <ol style={{ margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.7 }}>
-            <li>Go to developers.facebook.com → My Apps → Create app → type “Business”, then add the WhatsApp product.</li>
+            <li>
+              Go to developers.facebook.com → My Apps → Create app → type “Business”, then add the WhatsApp product. <Open href={LINKS.metaApps} />
+            </li>
             <li>WhatsApp → API Setup: add your business phone number (a number that is not on the WhatsApp app) and verify it by SMS. Copy the <b>Phone number ID</b> shown under the number (not the WhatsApp Business Account ID).</li>
-            <li>Permanent token: business.facebook.com → Settings → Users → System users → Add (role Admin) → Assign assets: your app (full control) and your WhatsApp account → Generate new token → permissions <code>whatsapp_business_messaging</code> and <code>whatsapp_business_management</code>, expiry “Never”. Copy it.</li>
+            <li>
+              Permanent token: business.facebook.com → Settings → Users → System users → Add (role Admin) → Assign assets: your app (full control) and your WhatsApp account → Generate new token → permissions <code>whatsapp_business_messaging</code> and <code>whatsapp_business_management</code>, expiry “Never”. Copy it. <Open href={LINKS.systemUsers} />
+            </li>
             <li>Optional but recommended: App settings → Basic → App secret, paste it below so only Meta can post to the webhook.</li>
-            <li>Template for first contacts: WhatsApp Manager → Message templates → Create → category Marketing → write the body with variables, e.g. “Bonjour {'{{1}}'}, je suis Jarvis de Lumora Digital. {'{{3}}'} Puis-je vous envoyer les détails ?” → submit for approval. Enter its name, language code and number of variables below.</li>
-            <li>Replies: the PC needs a public HTTPS address. In a terminal run <code>cloudflared tunnel --url http://127.0.0.1:7777</code> (or <code>ngrok http 7777 --url=your-name.ngrok-free.app</code>), paste the https address in “Public URL” below, then in your Meta app → WhatsApp → Configuration → Webhook: Callback URL and Verify token as shown here, and subscribe to the <b>messages</b> field.</li>
+            <li>
+              Template for first contacts: WhatsApp Manager → Message templates → Create → category Marketing → write the body with variables, e.g. “Bonjour {'{{1}}'}, je suis Jarvis de Lumora Digital. {'{{3}}'} Puis-je vous envoyer les détails ?” → submit for approval. Enter its name, language code and number of variables below. <Open href={LINKS.templates} />
+            </li>
+            <li>
+              Replies: the PC needs a public HTTPS address. Install cloudflared <Open href={LINKS.cloudflared} />, run <code>cloudflared tunnel --url http://127.0.0.1:7777</code> (or <code>ngrok http 7777 --url=your-name.ngrok-free.app</code>), paste the https address in “Public URL” below, then in your Meta app → WhatsApp → Configuration → Webhook: Callback URL and Verify token as shown here, and subscribe to the <b>messages</b> field.
+            </li>
           </ol>
         </details>
         <form

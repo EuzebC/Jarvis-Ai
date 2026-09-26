@@ -1,8 +1,20 @@
 import { useState } from 'react';
 import { api, useData } from '../api.js';
 import { Pill, toast, ago } from '../components/ui.jsx';
+import { go } from '../App.jsx';
 
-const KIND_LABEL = { email: 'Email', proposal: 'Proposal', whatsapp: 'WhatsApp', post: 'Post', call: 'Call', payment: 'Payment · always you', contract: 'Contract', purchase: 'Purchase · always you', deletion: 'Deletion', other: 'For you to do' };
+const KIND_LABEL = { email: 'Email', proposal: 'Proposal', whatsapp: 'WhatsApp', post: 'Post', call: 'Call', payment: 'Payment · needs you', contract: 'Contract', purchase: 'Purchase · needs you', deletion: 'Deletion', other: 'Action' };
+const STATE = (a) => {
+  if (a.status === 'review') return ['running', 'in review'];
+  if (a.status === 'rejected') return ['failed', 'rejected'];
+  if (a.status === 'pending') return ['pending', 'needs you'];
+  if (a.delivery === 'sent') return ['done', 'sent'];
+  if (a.delivery === 'queued') return ['running', 'sending'];
+  if (a.delivery === 'failed') return ['failed', 'not sent'];
+  if (a.delivery === 'blocked') return ['failed', 'blocked'];
+  if (a.delivery === 'needs_connector') return ['pending', 'waiting for connector'];
+  return ['done', 'approved'];
+};
 
 const textOf = (a) => {
   const d = a.payload || {};
@@ -66,18 +78,23 @@ export function ApprovalCard({ a, compact = false }) {
         </div>
       ) : (
         <div className="row small">
-          <Pill status={a.delivery === 'sent' ? 'done' : a.delivery === 'failed' ? 'failed' : a.status}>{a.delivery === 'sent' ? 'sent' : a.delivery === 'queued' ? 'sending' : a.delivery === 'failed' ? 'not sent' : a.status}</Pill>
+          <Pill status={STATE(a)[0]}>{STATE(a)[1]}</Pill>
           <span className="muted grow">
-            {a.decided_by === 'leader' ? 'By the team leader. ' : ''}
+            {a.decided_by === 'leader' ? 'By the team leader. ' : a.decided_by === 'jarvis' ? 'Reviewed by Jarvis. ' : ''}
             {a.delivery_note ?? a.note}
           </span>
-          {a.status === 'approved' && ['failed', 'manual', null].includes(a.delivery ?? null) && (d.to || '').includes('@') && (
+          {a.status === 'review' && (
+            <button type="button" className="btn small" disabled={busy} onClick={() => decide('reject')}>
+              Drop
+            </button>
+          )}
+          {a.status === 'approved' && a.delivery === 'failed' && (
             <button type="button" className="btn small primary" disabled={busy} onClick={() => api('POST', `/api/approvals/${a.id}/send`).then(() => toast('Sending…')).catch((e) => toast(e.message, true))}>
               Send
             </button>
           )}
-          {a.status === 'approved' && (
-            <button type="button" className="btn small" onClick={() => navigator.clipboard.writeText(textOf(a)).then(() => toast('Copied, ready to send'))}>
+          {a.status === 'approved' && a.delivery !== 'sent' && (
+            <button type="button" className="btn small" onClick={() => navigator.clipboard.writeText(textOf(a)).then(() => toast('Copied'))}>
               Copy
             </button>
           )}
@@ -87,22 +104,55 @@ export function ApprovalCard({ a, compact = false }) {
   );
 }
 
+// Notices for connectors with messages waiting, each with a link straight to the card where the key goes.
+export function ConnectorNotices({ items, compact = false }) {
+  if (!items?.length) return null;
+  return (
+    <>
+      {items.map((w) => (
+        <div key={w.connector} className="panel warn col" style={{ gap: 6 }}>
+          <div style={{ fontWeight: 600, lineHeight: 1.4 }}>
+            {w.count} message{w.count === 1 ? '' : 's'} ready for {w.label}. Add the {w.label} key and they send by themselves.
+          </div>
+          {!compact && <div className="small muted">Jarvis reviewed them with their missions. Nothing else is needed from you.</div>}
+          <button type="button" className="btn small primary" style={{ alignSelf: 'flex-start' }} onClick={() => go(`/settings/${w.connector}`)}>
+            Add the {w.label} key ›
+          </button>
+        </div>
+      ))}
+    </>
+  );
+}
+
+const TABS = [
+  ['ready', 'Ready to send', { status: 'approved', delivery: 'needs_connector' }],
+  ['sending', 'Sending & sent', { status: 'approved' }],
+  ['review', 'In review', { status: 'review' }],
+  ['money', 'Money (needs you)', { status: 'pending' }],
+  ['rejected', 'Rejected', { status: 'rejected' }],
+];
+
 export default function Approvals({ ctx }) {
-  const [tab, setTab] = useState('pending');
+  const [tab, setTab] = useState('ready');
   const [scope, setScope] = useState('here');
   const orgQ = scope === 'here' && ctx.orgId ? `&org=${ctx.orgId}` : '';
-  const list = useData(`/api/approvals?status=${tab}${orgQ}`, [tab, orgQ]);
-  const tabs = [
-    ['pending', 'Waiting for you'],
-    ['approved', 'Outbox (approved)'],
-    ['rejected', 'Rejected'],
-  ];
+  const spec = TABS.find(([k]) => k === tab)[2];
+  const list = useData(`/api/approvals?status=${spec.status}${spec.delivery ? `&delivery=${spec.delivery}` : ''}${orgQ}`, [tab, orgQ]);
+  const rows = (list.data ?? []).filter((a) => tab !== 'sending' || a.delivery !== 'needs_connector');
+  const notices = ctx.overview?.connectorsNeeded ?? [];
+  const empty = {
+    ready: 'Nothing is waiting for a connector.',
+    sending: 'Nothing has been sent yet.',
+    review: 'No messages are waiting for Jarvis’s review.',
+    money: 'No payments or purchases need you.',
+    rejected: 'Nothing here.',
+  }[tab];
   return (
     <div className="page-pad col" style={{ gap: 16, maxWidth: 980, margin: '0 auto' }}>
       <div className="row between">
         <div>
-          <h1 style={{ fontSize: 28 }}>APPROVALS</h1>
-          <div className="muted small">Nothing leaves the company without approval. Payments always come to you.</div>
+          <h1 style={{ fontSize: 28 }}>OUTBOX</h1>
+          <div className="muted small">Jarvis reviews every message with its mission and sends it. Only money waits for you.</div>
         </div>
         {ctx.orgId && (
           <div className="seg">
@@ -115,22 +165,20 @@ export default function Approvals({ ctx }) {
           </div>
         )}
       </div>
+      {tab === 'ready' && <ConnectorNotices items={notices} />}
       <div className="seg" style={{ alignSelf: 'flex-start' }}>
-        {tabs.map(([k, l]) => (
+        {TABS.map(([k, l]) => (
           <button key={k} type="button" className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>
             {l.toUpperCase()}
           </button>
         ))}
       </div>
       <div className="col" style={{ gap: 12 }}>
-        {(list.data ?? []).map((a) => (
+        {rows.map((a) => (
           <ApprovalCard key={a.id} a={a} />
         ))}
-        {list.data && !list.data.length && <div className="empty panel">{tab === 'pending' ? 'All clear. Nothing is waiting for you.' : 'Nothing here yet.'}</div>}
+        {list.data && !rows.length && <div className="empty panel">{empty}</div>}
       </div>
-      {tab === 'approved' && (
-        <p className="small faint">Approved emails and WhatsApp messages are sent by the connectors (Settings). Items marked “For you to do” have no connector yet, so you carry them out.</p>
-      )}
     </div>
   );
 }

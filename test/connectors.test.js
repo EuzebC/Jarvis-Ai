@@ -15,14 +15,15 @@ const approval = (kind, details) => {
   return one('SELECT * FROM approvals WHERE id = ?', id);
 };
 
-test('approved items are routed: no address or no Gmail means manual, otherwise queued', () => {
+test('approved items are routed: no address means manual, no Gmail means waiting for the connector, otherwise queued', () => {
   let a = approval('email', { to: '', body: 'hi' });
   routeApproved(a);
   assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', a.id).delivery, 'manual');
 
   a = approval('email', { to: 'dr@clinic.rw', body: 'hi' });
-  assert.match(routeApproved(a), /Connect Gmail/);
-  assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', a.id).delivery, 'manual');
+  assert.match(routeApproved(a), /Gmail connector/);
+  assert.equal(one('SELECT delivery, connector FROM approvals WHERE id = ?', a.id).delivery, 'needs_connector');
+  assert.equal(one('SELECT connector FROM approvals WHERE id = ?', a.id).connector, 'gmail');
 
   a = approval('payment', { to: 'bank@x.com' });
   routeApproved(a);
@@ -32,7 +33,7 @@ test('approved items are routed: no address or no Gmail means manual, otherwise 
   setSetting('gmail_app_password', 'abcd efgh ijkl mnop');
   setSetting('gmail_daily_limit', '0'); // keeps the worker from actually sending in this test
   a = approval('proposal', { to: 'Dr Uwase <dr@clinic.rw>', body: 'Proposal' });
-  assert.match(routeApproved(a), /Daily limit/);
+  assert.match(routeApproved(a), /Daily email limit/);
   assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', a.id).delivery, 'queued');
 });
 

@@ -23,7 +23,7 @@ export const go = (path) => {
 function useRoute() {
   const read = () => {
     const [, view = '', idStr] = location.hash.replace(/^#/, '').split('/');
-    return { view, id: idStr ? Number(idStr) : null };
+    return { view, id: idStr && /^\d+$/.test(idStr) ? Number(idStr) : null, param: idStr ?? null };
   };
   const [r, setR] = useState(read);
   useEffect(() => {
@@ -134,11 +134,15 @@ export function useAsk(orgId) {
       if (!text.trim()) return;
       setBusy(true);
       setReply(null);
+      // Spoken requests get a short acknowledgement before the real answer, so there is never a silent wait.
+      const ack = speak ? setTimeout(() => voice.speak('On it.'), 1800) : null;
       try {
         const r = await api('POST', '/api/ask', { text, org_id: orgId, spoken: speak });
+        clearTimeout(ack);
         setReply(r);
         if (speak) voice.speak(r.reply);
       } catch (e) {
+        clearTimeout(ack);
         if (!(e instanceof SignedOut)) toast(e.message, true);
       } finally {
         setBusy(false);
@@ -319,7 +323,8 @@ export default function App() {
   if (!authed) return <Login setupRequired={me.setupRequired} onDone={loadMe} />;
 
   const org = orgs.data?.find((o) => o.id === orgId);
-  const pending = overview.data?.pendingTotal ?? 0;
+  // The badge counts what needs you: money decisions and connectors with messages waiting.
+  const pending = (overview.data?.pendingTotal ?? 0) + (overview.data?.connectorsNeeded?.length ?? 0);
   const v = route.view;
   const needsOrg = workspace === 'org' && orgs.data && !orgs.data.length && v !== 'new-org';
 
@@ -333,7 +338,7 @@ export default function App() {
   else if (v === 'project') screen = <Project ctx={ctx} id={route.id} />;
   else if (v === 'approvals') screen = <Approvals ctx={ctx} />;
   else if (v === 'mind') screen = <Mind ctx={ctx} />;
-  else if (v === 'settings') screen = <Settings ctx={ctx} reload={settings.reload} />;
+  else if (v === 'settings') screen = <Settings ctx={ctx} reload={settings.reload} focus={route.param} />;
   else screen = workspace === 'personal' ? <PersonalHome ctx={ctx} /> : <OrgHome ctx={ctx} />;
 
   const nav = (name, path, label, extra) => (
@@ -375,7 +380,7 @@ export default function App() {
         <nav className="navicons" aria-label="Sections">
           {nav('home', '/', 'Home')}
           {workspace === 'org' && nav('map', '/map', 'Organisation map')}
-          {nav('approvals', '/approvals', 'Approvals', pending > 0 && <span className="badge">{pending}</span>)}
+          {nav('approvals', '/approvals', 'Outbox', pending > 0 && <span className="badge">{pending}</span>)}
           {nav('mind', '/mind', 'Mind: memories and files')}
           {nav('settings', '/settings', 'Settings')}
           <button type="button" className="iconbtn" onClick={activate} aria-label="Talk to Jarvis (Ctrl+Space)" title="Talk to Jarvis (Ctrl+Space)" style={{ color: voiceState === 'listening' || voiceState === 'command' ? 'var(--p)' : undefined }}>

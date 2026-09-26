@@ -15,6 +15,7 @@ import { runSession, GRADE_MODEL } from './runtime.js';
 import { jarvisTools, recordActivity } from './tools.js';
 import { ensureWorkspace, writeClaudeMd, readMemory } from './workspace.js';
 import { hasPlaceholders } from './policy.js';
+import { releaseReviewed, reviewItems } from './proposals.js';
 
 const MAX_ROUNDS = 3;
 // Two Claude sessions at a time: enough to keep departments moving without draining the 5-hour window in one burst.
@@ -196,13 +197,40 @@ function quickChecks(root, task, files) {
       if (hasPlaceholders(content)) problems.push(`${f.rel} still contains placeholders.`);
     }
   }
+  // Messages waiting for Jarvis's review: the obvious defects are caught here, the judgement is the verifier's.
+  for (const a of reviewItems(task.id)) {
+    const d = JSON.parse(a.payload || '{}');
+    const body = String(d.body ?? '');
+    if (body.trim().length < 40) problems.push(`Message "${a.summary.slice(0, 60)}" has no real body.`);
+    if ((a.kind === 'email' || a.kind === 'proposal') && !String(d.subject ?? '').trim()) problems.push(`Email "${a.summary.slice(0, 60)}" has no subject.`);
+    if (hasPlaceholders(`${d.subject ?? ''}\n${body}`)) problems.push(`Message "${a.summary.slice(0, 60)}" still contains placeholders.`);
+  }
   return problems;
+}
+
+// The messages a mission proposed, written where the verifier can read them.
+function writeProposedFile(root, task) {
+  const items = reviewItems(task.id);
+  const file = path.join(root, 'journal', `proposed-${task.id}.md`);
+  if (!items.length) {
+    if (fs.existsSync(file)) fs.rmSync(file);
+    return { count: 0, rel: null };
+  }
+  const lines = [`# Messages proposed in mission #${task.id}`, '', 'Jarvis sends these automatically once the mission passes verification.', ''];
+  items.forEach((a, i) => {
+    const d = JSON.parse(a.payload || '{}');
+    lines.push(`## ${i + 1}. [${a.kind}] ${a.summary}`, `To: ${d.to ?? ''}${d.to_name ? ` (${d.to_name})` : ''}${d.company ? ` · ${d.company}` : ''}`, d.subject ? `Subject: ${d.subject}` : '', d.hook ? `Hook: ${d.hook}` : '', '', String(d.body ?? ''), '');
+  });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, lines.filter((l) => l !== null).join('\n'));
+  return { count: items.length, rel: `journal/proposed-${task.id}.md` };
 }
 
 async function verify({ scope, task, leader, root, report, files, signal }) {
   const problems = quickChecks(root, task, files);
   if (problems.length) return { passed: false, feedback: problems.join(' ') };
-  if (!task.dod) return { passed: true, feedback: 'No definition of done; accepted on delivery.' };
+  const proposed = writeProposedFile(root, task);
+  if (!task.dod && !proposed.count) return { passed: true, feedback: 'No definition of done; accepted on delivery.' };
   const res = await runSession({
     cwd: root,
     model: 'sonnet',
@@ -210,8 +238,8 @@ async function verify({ scope, task, leader, root, report, files, signal }) {
     maxBudgetUsd: 1.5,
     timeoutMs: 10 * 60_000,
     disallowedTools: ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Agent', 'Task', 'WebSearch', 'WebFetch'],
-    append: 'You are a strict but fair verifier. You only read files; you never change anything. Judge whether the definition of done was actually met with real content (no placeholders, no invented contact details, numbers as required). Reply with a short assessment and end with exactly one json block: {"passed": true|false, "feedback": "what is missing or wrong, specific and actionable"}.',
-    prompt: `MISSION: ${task.title}\n\nDEFINITION OF DONE:\n${task.dod}\n\nLEADER'S FINAL REPORT:\n${report.slice(0, 8000)}\n\nFILES CHANGED DURING THE MISSION (paths relative to the workspace; read the important ones):\n${files.map((f) => `- ${f.rel} (${f.size} bytes)`).join('\n') || '(none)'}\n\nActions proposed during the mission: ${one(`SELECT COUNT(*) AS n FROM approvals WHERE task_id = ?`, task.id).n}. Leads in the CRM: ${(() => { try { return fs.readFileSync(path.join(root, 'crm', 'leads.csv'), 'utf8').trim().split(/\r?\n/).length - 1; } catch { return 0; } })()}.`,
+    append: 'You are Jarvis reviewing your team’s work: strict but fair. You only read files; you never change anything. Judge whether the definition of done was actually met with real content (no placeholders, no invented contact details, numbers as required), and review every proposed message as if you were sending it under your own name. Reply with a short assessment and end with exactly one json block: {"passed": true|false, "feedback": "what is missing or wrong, specific and actionable"}.',
+    prompt: `MISSION: ${task.title}\n\nDEFINITION OF DONE:\n${task.dod || '(none: judge the proposed messages only)'}\n\nLEADER'S FINAL REPORT:\n${report.slice(0, 8000)}\n\nFILES CHANGED DURING THE MISSION (paths relative to the workspace; read the important ones):\n${files.map((f) => `- ${f.rel} (${f.size} bytes)`).join('\n') || '(none)'}\n\n${proposed.count ? `MESSAGES PROPOSED: ${proposed.count}, listed in ${proposed.rel}. Read that file. They are sent automatically the moment you pass this mission, so check each one: a real recipient found on a real page; personalised to that business (not a template with the name swapped); the language the recipient uses; consistent with the company profile, offer and prices in CLAUDE.md; no false claims; no placeholders; polite and short enough for the channel; not a duplicate to the same recipient. If any message is not ready, fail the mission and name the numbers and what to fix.` : 'No messages were proposed.'} Leads in the CRM: ${(() => { try { return fs.readFileSync(path.join(root, 'crm', 'leads.csv'), 'utf8').trim().split(/\r?\n/).length - 1; } catch { return 0; } })()}.`,
     signal,
   });
   if (!res.ok) return { passed: true, feedback: `Verifier unavailable (${res.error.slice(0, 120)}); accepted.` };
@@ -349,7 +377,8 @@ class Scheduler {
     if (task.kind === 'mission') verdict = await verify({ scope, task, leader, root, report: res.text, files, signal: controller.signal });
     if (verdict.passed) {
       run(`UPDATE tasks SET status = 'done', verify_status = ?, verify_note = ?, live_status = NULL, finished_at = ? WHERE id = ?`, task.dod ? 'passed' : 'skipped', verdict.feedback, now(), task.id);
-      log('info', `✔ Mission #${task.id} delivered and verified: ${task.title}${files.length ? ` · ${files.length} file(s)` : ''}`, task.org_id);
+      const released = task.kind === 'mission' ? releaseReviewed(task.id, { passed: true }) : 0;
+      log('info', `✔ Mission #${task.id} delivered and verified: ${task.title}${files.length ? ` · ${files.length} file(s)` : ''}${released ? ` · ${released} message(s) reviewed and released` : ''}`, task.org_id);
       writeReport(one('SELECT * FROM tasks WHERE id = ?', task.id), leader);
       // A delivered mission wakes the Operator so the next piece of work is planned without waiting for the clock.
       if (task.org_id) import('./operator.js').then((m) => m.wakeOperator(task.org_id, `mission #${task.id} delivered: ${task.title}`)).catch(() => {});
@@ -358,6 +387,7 @@ class Scheduler {
       log('warn', `↩ Mission #${task.id} sent back (round ${task.round + 1}): ${verdict.feedback.slice(0, 160)}`, task.org_id);
     } else {
       run(`UPDATE tasks SET status = 'failed', verify_status = 'failed', verify_note = ?, error = ?, live_status = NULL, finished_at = ? WHERE id = ?`, verdict.feedback, `Not delivered after ${MAX_ROUNDS} rounds: ${verdict.feedback}`, now(), task.id);
+      releaseReviewed(task.id, { passed: false, feedback: verdict.feedback });
       log('error', `✖ Mission #${task.id} failed verification ${MAX_ROUNDS} times: ${task.title}`, task.org_id);
     }
     notify('tasks', { orgId: task.org_id });
@@ -367,6 +397,7 @@ class Scheduler {
 
   finish(id, status, error) {
     run('UPDATE tasks SET status = ?, error = ?, live_status = NULL, finished_at = ? WHERE id = ?', status, error, now(), id);
+    if (status !== 'done') releaseReviewed(id, { passed: false, feedback: String(error ?? status) });
     const t = one('SELECT org_id, title, agent_id FROM tasks WHERE id = ?', id);
     if (t?.agent_id) run(`UPDATE agents SET status = 'idle' WHERE id = ?`, t.agent_id);
     if (status === 'failed') log('error', `✖ Mission failed: ${t?.title}: ${String(error).slice(0, 200)}`, t?.org_id);

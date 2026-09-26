@@ -71,7 +71,7 @@ export function createTask({ agent, title, instructions = '', priority = 50, par
 export function decideApproval(id, approve, by = 'owner', note = null) {
   const a = one('SELECT * FROM approvals WHERE id = ?', id);
   if (!a) throw new Error('Approval not found');
-  if (a.status !== 'pending') throw new Error(`Already ${a.status}`);
+  if (!['pending', 'review'].includes(a.status)) throw new Error(`Already ${a.status}`);
   if (a.kind === 'payment' && by !== 'owner') throw new Error('Payments can only be approved by the owner');
   run('UPDATE approvals SET status = ?, decided_by = ?, note = ?, decided_at = ? WHERE id = ?', approve ? 'approved' : 'rejected', by, note ?? (approve ? 'Approved.' : 'Rejected.'), now(), id);
   // Approved emails and proposals go to the Outbox and are sent from Gmail when connected.

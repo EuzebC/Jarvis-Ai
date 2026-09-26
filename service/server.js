@@ -10,7 +10,7 @@ import './routes.js';
 import { scheduler, createMission } from './brain/missions.js';
 import { operatorTick, wakeOperator } from './brain/operator.js';
 import { ensurePersonalAgents, ensureOrgJarvis } from './agents.js';
-import { deliverQueued, checkReplies, followUp } from './outbox.js';
+import { deliverQueued, checkReplies, followUp, migratePendingActions } from './outbox.js';
 import { adoptFolders } from './brain/workspace.js';
 import { syncMinds, writeBriefing } from './connectors/obsidian.js';
 
@@ -92,6 +92,8 @@ async function handle(req, res) {
 ensurePersonalAgents();
 for (const o of all('SELECT id FROM orgs')) ensureOrgJarvis(o.id);
 for (const [name, folder] of adoptFolders()) log('info', `${name} now works in ${folder}`);
+const migrated = migratePendingActions();
+if (migrated) log('info', `${migrated} waiting item(s) brought in line with the current policy`);
 
 const server = http.createServer((req, res) => handle(req, res).catch(() => !res.headersSent && send(res, 500, { error: 'Internal error' })));
 server.on('error', (err) => {

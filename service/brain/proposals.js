@@ -1,7 +1,7 @@
 // Policy-aware creation of outgoing actions. Agents never send anything themselves: every action goes
 // through here, is routed by the policy (auto-send, team leader, or owner), and approved emails are
 // handed to the Outbox, which sends them from Gmail and logs them in HubSpot.
-import { one, insert, run, now, getSetting } from '../db.js';
+import { one, all, insert, run, now, getSetting } from '../db.js';
 import { log, notify } from '../events.js';
 import { routeApproved } from '../outbox.js';
 import { isBlocked } from '../optout.js';
@@ -28,12 +28,13 @@ export function contactHasReplied(orgId, email) {
 export function proposeAction({ scope, task, kind, summary, details = {} }) {
   const orgId = scope.orgId ?? null;
   const to = String(details.to ?? '');
+  // A message with a phone number is a WhatsApp message, whatever the agent called it.
+  if ((kind === 'other' || kind === 'call') && details.body && normalisePhone(details.phone || details.channel || to)) kind = 'whatsapp';
   const needsRecipient = OUTGOING.has(kind) && kind !== 'post';
   // WhatsApp messages are addressed to a phone number; everything else to an email address.
-  const email = kind === 'whatsapp' ? normalisePhone(details.phone || to) : (to.match(EMAIL_RE)?.[0]?.toLowerCase() ?? null);
+  const email = kind === 'whatsapp' ? normalisePhone(details.phone || details.channel || to) : (to.match(EMAIL_RE)?.[0]?.toLowerCase() ?? null);
 
   if (kind === 'whatsapp' && !email) return { ok: false, message: 'Refused: a WhatsApp message needs the phone number you actually found (international format).' };
-  if (kind === 'whatsapp' && !whatsappConnected()) return { ok: false, message: 'Refused: WhatsApp is not connected yet. Propose it as kind "other" with the number in details.channel so the owner can send it from their phone, or use email.' };
   if (needsRecipient && !email && kind !== 'call') {
     return { ok: false, message: 'Refused: an email or proposal needs a real recipient address that you actually found. If there is none, add the lead to the CRM with the contact channel you did find and move on.' };
   }
@@ -54,6 +55,17 @@ export function proposeAction({ scope, task, kind, summary, details = {} }) {
   if (decision.route === 'decline') return { ok: false, route: 'decline', message: decision.reason };
 
   const auto = decision.route === 'auto';
+  // Messages proposed inside a mission wait for Jarvis's review, which happens when the mission is delivered and verified.
+  const review = auto && OUTGOING.has(kind) && task?.id && (task.kind ?? 'mission') === 'mission';
+  const payload = JSON.stringify(kind === 'whatsapp' ? { ...details, to: email } : details);
+  if (review && email) {
+    // The same recipient proposed again in the same mission (for example after feedback) replaces the earlier draft.
+    const dup = one(`SELECT id FROM approvals WHERE task_id = ? AND status = 'review' AND kind = ? AND lower(json_extract(payload, '$.to')) = lower(?)`, task.id, kind, kind === 'whatsapp' ? email : to);
+    if (dup) {
+      run('UPDATE approvals SET summary = ?, payload = ?, created_at = ? WHERE id = ?', String(summary).slice(0, 500), payload, now(), dup.id);
+      return { ok: true, route: 'review', approvalId: dup.id, message: 'Updated your earlier draft to this recipient. Jarvis reviews it when the mission is delivered; continue.' };
+    }
+  }
   const id = insert(
     `INSERT INTO approvals (task_id, org_id, team_id, kind, summary, payload, status, decided_by, note, route, created_at, decided_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -62,16 +74,18 @@ export function proposeAction({ scope, task, kind, summary, details = {} }) {
     task?.team_id ?? null,
     kind,
     String(summary).slice(0, 500),
-    JSON.stringify(kind === 'whatsapp' ? { ...details, to: email } : details),
-    auto ? 'approved' : 'pending',
-    auto ? 'policy' : null,
-    auto ? decision.reason : null,
-    decision.route,
+    payload,
+    review ? 'review' : auto ? 'approved' : 'pending',
+    auto && !review ? 'policy' : null,
+    review ? 'Waiting for Jarvis’s review when the mission is delivered.' : auto ? decision.reason : null,
+    review ? 'review' : decision.route,
     now(),
-    auto ? now() : null,
+    auto && !review ? now() : null,
   );
   let message;
-  if (auto) {
+  if (review) {
+    message = `Accepted for review. Jarvis checks it when your mission is delivered and then sends it itself${kind === 'whatsapp' && !whatsappConnected() ? ' (WhatsApp is not connected yet: it waits in the Outbox and goes out as soon as the owner adds the key, so keep proposing)' : ''}. Continue with the next one.`;
+  } else if (auto) {
     const note = routeApproved(one('SELECT * FROM approvals WHERE id = ?', id));
     message = `Sent for delivery automatically (${decision.reason}) ${note}`;
   } else if (decision.route === 'leader') {
@@ -81,8 +95,25 @@ export function proposeAction({ scope, task, kind, summary, details = {} }) {
   }
   log('info', `${auto ? '⚡' : '⏳'} ${kind}: ${String(summary).slice(0, 120)} (${decision.route})`, orgId);
   notify('approvals', { orgId });
-  return { ok: true, route: decision.route, approvalId: id, message };
+  return { ok: true, route: review ? 'review' : decision.route, approvalId: id, message };
 }
+
+// Jarvis's review happens with the mission's verification: a delivered mission releases its messages, a failed one drops them.
+export function releaseReviewed(taskId, { passed, feedback = '' }) {
+  const rows = one(`SELECT COUNT(*) AS n FROM approvals WHERE task_id = ? AND status = 'review'`, taskId).n;
+  if (!rows) return 0;
+  if (passed) {
+    run(`UPDATE approvals SET status = 'approved', decided_by = 'jarvis', note = 'Reviewed by Jarvis with the delivered mission.', decided_at = ? WHERE task_id = ? AND status = 'review'`, now(), taskId);
+    for (const a of all(`SELECT * FROM approvals WHERE task_id = ? AND decided_by = 'jarvis' AND delivery IS NULL`, taskId)) routeApproved(a);
+  } else {
+    run(`UPDATE approvals SET status = 'rejected', decided_by = 'jarvis', note = ?, decided_at = ? WHERE task_id = ? AND status = 'review'`, `Dropped: the mission was not delivered. ${String(feedback).slice(0, 300)}`, now(), taskId);
+  }
+  const org = one('SELECT org_id FROM approvals WHERE task_id = ? LIMIT 1', taskId);
+  notify('approvals', { orgId: org?.org_id ?? null });
+  return rows;
+}
+
+export const reviewItems = (taskId) => all(`SELECT * FROM approvals WHERE task_id = ? AND status = 'review' ORDER BY id`, taskId);
 
 // A team leader (or a review session) decides an item that was routed to them.
 export function leaderDecision(approvalId, approve, reason) {

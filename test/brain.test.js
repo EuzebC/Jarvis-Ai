@@ -10,7 +10,8 @@ const policy = await import('../service/brain/policy.js');
 const ws = await import('../service/brain/workspace.js');
 const { insert, one, now, setSetting } = await import('../service/db.js');
 const wa = await import('../service/connectors/whatsapp.js');
-const { adoptPendingWhatsapp } = await import('../service/outbox.js');
+const { migratePendingActions, requeueForConnector } = await import('../service/outbox.js');
+const { releaseReviewed } = await import('../service/brain/proposals.js');
 const { run: dbRun } = await import('../service/db.js');
 const { proposeAction } = await import('../service/brain/proposals.js');
 const { appendLead, readLeads } = await import('../service/brain/tools.js');
@@ -37,7 +38,8 @@ test('policy: payments always to the owner; the approval level decides the rest;
   assert.match(policy.approvalSentence('payments'), /payments and purchases only/);
   assert.equal(policy.routeAction({ kind: 'other', summary: 'Owner: confirm the do-not-contact list is complete' }).route, 'decline');
   assert.equal(policy.routeAction({ kind: 'other', summary: 'Which approach should we take?' }).route, 'decline');
-  assert.equal(policy.routeAction({ kind: 'other', summary: 'Submit the enquiry form on their website with our pitch' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'other', summary: 'Submit the enquiry form on their website with our pitch' }).route, 'decline'); // agents do it themselves
+  assert.equal(policy.routeAction({ kind: 'call' }).route, 'decline'); // Jarvis has no phone
   assert.equal(policy.hasPlaceholders('Dear [Client], your [AMOUNT]'), true);
   assert.equal(policy.hasPlaceholders('Dear Dr Uwase, 450,000 RWF'), false);
 });
@@ -126,7 +128,7 @@ test('proposals: refuse missing recipients and placeholders, first contact follo
   assert.equal(one('SELECT status FROM approvals WHERE id = ?', first.approvalId).status, 'pending');
   // WhatsApp needs a phone number and the connector.
   assert.match(proposeAction({ scope, task, kind: 'whatsapp', summary: 'x', details: { body: 'Hello' } }).message, /phone number/);
-  assert.match(proposeAction({ scope, task, kind: 'whatsapp', summary: 'x', details: { phone: '+250 788 123 456', body: 'Hello' } }).message, /not connected/);
+  assert.equal(proposeAction({ scope, task, kind: 'whatsapp', summary: 'x', details: { phone: '+250 788 123 456', body: 'Hello there, a real message.' } }).route, 'owner'); // first_contact level
   const sent = insert(`INSERT INTO sent_emails (org_id, message_id, to_email, subject, sent_at) VALUES (?, 'm1', 'dr@smile.rw', 'Hi', ?)`, orgId, now());
   insert(`INSERT INTO replies (sent_email_id, from_email, subject, body, received_at, uid) VALUES (?, 'dr@smile.rw', 'Re: Hi', 'Yes please', ?, 'u1')`, sent, now());
   const followUp = proposeAction({ scope, task, kind: 'email', summary: 'Follow-up', details: { to: 'dr@smile.rw', subject: 'Re: Hi', body: 'Great, Thursday?' } });
@@ -156,22 +158,60 @@ test('whatsapp: numbers are normalised, webhook payloads are parsed, inbound mes
   assert.equal(policy.routeAction({ kind: 'whatsapp', contactHasReplied: true, level: 'first_contact' }).route, 'auto');
 });
 
-test('whatsapp: first contacts that waited for the owner move to the WhatsApp outbox once it is connected', () => {
+test('outbox: messages wait for a missing connector and go out when it is connected; no owner to-do list', () => {
+  setSetting('approval_level', 'payments');
   const task = { id: null, team_id: team.id, org_id: orgId };
-  const r = proposeAction({ scope, task, kind: 'other', summary: 'WhatsApp first contact to Salon Kigali', details: { company: 'Salon Kigali', phone: '+250 78 8000000', body: 'Muraho! Real pitch here.' } });
-  assert.equal(r.route, 'owner');
+  // A message with a phone number is a WhatsApp message, even when the agent called it "other".
+  const r = proposeAction({ scope, task, kind: 'other', summary: 'WhatsApp first contact to Salon Kigali', details: { company: 'Salon Kigali', phone: '+250 78 8000000', body: 'Muraho! Real pitch here, long enough to be a message.' } });
+  assert.equal(r.route, 'auto');
+  const row = one('SELECT * FROM approvals WHERE id = ?', r.approvalId);
+  assert.equal(row.kind, 'whatsapp');
+  assert.equal(row.status, 'approved');
+  assert.equal(row.delivery, 'needs_connector');
+  assert.equal(row.connector, 'whatsapp');
+  assert.equal(JSON.parse(row.payload).to, '250788000000');
+  // Actions the agent can do itself are refused with guidance, never queued for the owner.
   const unrelated = proposeAction({ scope, task, kind: 'other', summary: 'Submit the enquiry form on their website', details: { channel: 'https://example.rw/contact', body: 'Hello' } });
-  assert.equal(unrelated.route, 'owner');
+  assert.equal(unrelated.route, 'decline');
+  assert.match(unrelated.message, /yourself/);
+  assert.match(proposeAction({ scope, task, kind: 'call', summary: 'Call the clinic', details: {} }).message, /cannot place phone calls/);
+  // Legacy rows from the old policy are migrated at start.
+  const legacy = insert(`INSERT INTO approvals (org_id, kind, summary, payload, status, created_at) VALUES (?, 'other', 'WhatsApp first contact to X', ?, 'pending', ?)`, orgId, JSON.stringify({ phone: '+250788111222', body: 'Muraho, a real message body for the salon.' }), now());
+  const call = insert(`INSERT INTO approvals (org_id, kind, summary, payload, status, created_at) VALUES (?, 'call', 'Call Y', '{}', 'pending', ?)`, orgId, now());
+  assert.equal(migratePendingActions(), 2);
+  assert.equal(one('SELECT kind, status, delivery FROM approvals WHERE id = ?', legacy).delivery, 'needs_connector');
+  assert.equal(one('SELECT status FROM approvals WHERE id = ?', call).status, 'rejected');
+  // Connecting WhatsApp releases everything that waited for it.
   setSetting('whatsapp_phone_id', '123');
   setSetting('whatsapp_token', 'test');
-  assert.equal(adoptPendingWhatsapp(), 1);
+  assert.equal(requeueForConnector('whatsapp'), 2);
   dbRun(`DELETE FROM settings WHERE key IN ('whatsapp_phone_id', 'whatsapp_token')`); // before the queued delivery runs, so nothing is sent
-  const moved = one('SELECT * FROM approvals WHERE id = ?', r.approvalId);
-  assert.equal(moved.kind, 'whatsapp');
-  assert.equal(moved.status, 'approved');
-  assert.equal(moved.delivery, 'queued');
-  assert.equal(JSON.parse(moved.payload).to, '250788000000');
-  assert.equal(one('SELECT kind, status FROM approvals WHERE id = ?', unrelated.approvalId).kind, 'other');
+  assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', r.approvalId).delivery, 'queued');
+});
+
+test('review: messages proposed inside a mission wait for Jarvis and are released when the mission is delivered', () => {
+  setSetting('approval_level', 'payments');
+  const missionId = insert(`INSERT INTO tasks (org_id, team_id, title, instructions, status, kind, created_by, created_at) VALUES (?, ?, 'Outreach batch', 'x', 'running', 'mission', 'test', ?)`, orgId, team.id, now());
+  const mission = one('SELECT * FROM tasks WHERE id = ?', missionId);
+  const first = proposeAction({ scope, task: mission, kind: 'email', summary: 'Intro to Kigali Dental', details: { to: 'hello@kigalidental.rw', subject: 'Website', body: 'Dear Dr Mugisha, a real personalised message body here.' } });
+  assert.equal(first.route, 'review');
+  assert.equal(one('SELECT status FROM approvals WHERE id = ?', first.approvalId).status, 'review');
+  // Proposing the same recipient again (after feedback) updates the draft instead of duplicating it.
+  const again = proposeAction({ scope, task: mission, kind: 'email', summary: 'Intro to Kigali Dental (v2)', details: { to: 'hello@kigalidental.rw', subject: 'Website', body: 'Dear Dr Mugisha, an improved personalised message body here.' } });
+  assert.equal(again.approvalId, first.approvalId);
+  assert.match(JSON.parse(one('SELECT payload FROM approvals WHERE id = ?', first.approvalId).payload).body, /improved/);
+  const second = proposeAction({ scope, task: mission, kind: 'whatsapp', summary: 'WhatsApp to Salon Z', details: { phone: '+250788333444', body: 'Muraho! A real WhatsApp message body for Salon Z.' } });
+  assert.equal(one(`SELECT COUNT(*) AS n FROM approvals WHERE task_id = ? AND status = 'review'`, missionId).n, 2);
+  // Delivered and verified: Jarvis releases both; each waits for its connector.
+  assert.equal(releaseReviewed(missionId, { passed: true }), 2);
+  assert.equal(one('SELECT status, decided_by, delivery, connector FROM approvals WHERE id = ?', first.approvalId).connector, 'gmail');
+  assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', first.approvalId).delivery, 'needs_connector');
+  assert.equal(one('SELECT decided_by FROM approvals WHERE id = ?', second.approvalId).decided_by, 'jarvis');
+  // A mission that fails for good drops its drafts.
+  const failing = insert(`INSERT INTO tasks (org_id, team_id, title, instructions, status, kind, created_by, created_at) VALUES (?, ?, 'Bad batch', 'x', 'running', 'mission', 'test', ?)`, orgId, team.id, now());
+  const dropped = proposeAction({ scope, task: one('SELECT * FROM tasks WHERE id = ?', failing), kind: 'email', summary: 'Intro', details: { to: 'x@y.rw', subject: 'Hi', body: 'A real message body that is long enough to pass.' } });
+  releaseReviewed(failing, { passed: false, feedback: 'not personalised' });
+  assert.equal(one('SELECT status FROM approvals WHERE id = ?', dropped.approvalId).status, 'rejected');
 });
 
 test('CRM file: leads are appended once, de-duplicated by email or website', () => {

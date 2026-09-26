@@ -82,9 +82,9 @@ export function jarvisTools(ctx) {
 
   const propose = tool(
     'propose_action',
-    `The only way anything leaves the company. Proposes an outgoing action; Jarvis routes it by the owner's policy (most things send automatically; money always waits for the owner) and sends emails${whatsappConnected() ? ' and WhatsApp messages' : ''} itself. Never ask the owner questions with this; decide yourself.${whatsappConnected() ? ' WhatsApp: first contacts go out as the approved template (name, company, your one-line hook); write the full pitch in body, it is used once they reply.' : ' WhatsApp is not connected: messages for WhatsApp go as kind "other" with the number in details.channel.'}`,
+    `The only way anything leaves the company. Propose every outgoing message here (email, proposal, whatsapp, post): Jarvis reviews them when your mission is delivered and then sends them itself through Gmail and WhatsApp. If a connector is not set up yet the message waits in the Outbox and goes out the moment the owner adds the key, so keep proposing. Money (payment, purchase) waits for the owner. There is no owner to-do list: "call" and "other" are refused. WhatsApp first contacts go out as the approved template (name, company, your one-line hook) and your full body is used once they reply. Never ask the owner questions with this; decide yourself.`,
     {
-      kind: z.enum(KINDS).describe('email | proposal | whatsapp | post | call | payment | purchase | contract | deletion | other'),
+      kind: z.enum(KINDS).describe('email | proposal | whatsapp | post | payment | purchase | contract | deletion'),
       summary: z.string().describe('One line: what and to whom'),
       details: z
         .object({

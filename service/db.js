@@ -151,6 +151,7 @@ addColumn('tasks', 'live_status', 'TEXT');
 addColumn('tasks', 'target', 'TEXT'); // JSON {type: org|department|team|agent|personal, id}
 addColumn('approvals', 'route', 'TEXT'); // owner | leader | auto
 addColumn('orgs', 'workspace_path', 'TEXT'); // the organisation's folder on the owner's PC (optional)
+addColumn('approvals', 'connector', 'TEXT'); // gmail | whatsapp: the channel that sends (or is still missing)
 db.exec(`CREATE TABLE IF NOT EXISTS wa_messages (
   id INTEGER PRIMARY KEY, org_id INTEGER REFERENCES orgs(id) ON DELETE CASCADE, team_id INTEGER, approval_id INTEGER,
   direction TEXT NOT NULL, phone TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',

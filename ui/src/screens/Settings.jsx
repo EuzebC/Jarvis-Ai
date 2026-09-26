@@ -14,7 +14,7 @@ const LEVELS = [
   ['first_contact', 'Money, contracts, deletions and first contacts', 'The first message to a new contact waits for you (or the team leader when that switch is on).'],
 ];
 
-export default function Settings({ ctx, reload }) {
+export default function Settings({ ctx, reload, focus = null }) {
   const s = ctx.settings;
   const login = useData('/api/engines/login');
   const [apiKey, setApiKey] = useState('');
@@ -170,7 +170,7 @@ export default function Settings({ ctx, reload }) {
         </div>
       </section>
 
-      <Connectors orgId={ctx.orgId} />
+      <Connectors orgId={ctx.orgId} focus={focus} />
 
       <section className="panel col" style={{ gap: 12 }}>
         <span className="label">▶ This computer</span>
