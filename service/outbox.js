@@ -5,7 +5,7 @@ import { one, all, run, insert, now, getSetting } from './db.js';
 import { log, notify } from './events.js';
 import { gmailConnected, sendEmail, fetchReplies } from './connectors/gmail.js';
 import { hubspotConnected, addLead, logEmail, advanceDeal } from './connectors/hubspot.js';
-import { whatsappConnected, sendWhatsapp, recordOutbound, whatsappDailyLimit, whatsappSentToday, parseInbound, recordInbound } from './connectors/whatsapp.js';
+import { whatsappConnected, sendWhatsapp, recordOutbound, whatsappDailyLimit, whatsappSentToday, parseInbound, recordInbound, normalisePhone } from './connectors/whatsapp.js';
 import { isBlocked, isOptOut, blockContact } from './optout.js';
 
 const SENDABLE = ['email', 'proposal', 'whatsapp'];
@@ -136,6 +136,30 @@ export async function deliverQueued() {
     delivering = false;
     notify('approvals');
   }
+}
+
+// When WhatsApp gets connected, first contacts that were waiting for the owner to send by hand move to the WhatsApp queue.
+export function adoptPendingWhatsapp() {
+  const level = getSetting('approval_level', 'payments');
+  let n = 0;
+  for (const a of all(`SELECT * FROM approvals WHERE status = 'pending' AND kind = 'other'`)) {
+    const d = JSON.parse(a.payload || '{}');
+    const phone = normalisePhone(d.phone || d.channel || '');
+    if (!phone || !d.body || !/whatsapp/i.test(`${a.summary} ${d.channel ?? ''}`)) continue;
+    const payload = JSON.stringify({ ...d, to: phone });
+    if (level === 'first_contact') {
+      run(`UPDATE approvals SET kind = 'whatsapp', payload = ? WHERE id = ?`, payload, a.id);
+    } else {
+      run(`UPDATE approvals SET kind = 'whatsapp', payload = ?, status = 'approved', decided_by = 'policy', note = ?, route = 'auto', decided_at = ? WHERE id = ?`, payload, 'WhatsApp connected: first contacts send automatically.', now(), a.id);
+      routeApproved(one('SELECT * FROM approvals WHERE id = ?', a.id));
+    }
+    n++;
+  }
+  if (n) {
+    log('info', `${n} waiting WhatsApp first contact(s) moved to the WhatsApp outbox`);
+    notify('approvals');
+  }
+  return n;
 }
 
 // A reply (email or WhatsApp) becomes a mission for the team that started the conversation, and wakes the Operator.

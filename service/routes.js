@@ -19,7 +19,7 @@ import { clampPriority } from './protocol.js';
 import { testHubspot } from './connectors/hubspot.js';
 import { testGmail } from './connectors/gmail.js';
 import { testWhatsapp, verifyToken, signatureValid, whatsappConnected, whatsappDailyLimit, whatsappSentToday } from './connectors/whatsapp.js';
-import { deliverQueued, dailyLimit, sentToday, receiveWhatsapp } from './outbox.js';
+import { deliverQueued, dailyLimit, sentToday, receiveWhatsapp, adoptPendingWhatsapp } from './outbox.js';
 import { orgDir, suggestOrgFolder, moveOrgWorkspace, ensureWorkspace } from './brain/workspace.js';
 import { LEVELS, approvalSentence } from './brain/policy.js';
 import { defaultVault, initVault, syncMinds, writeBriefing } from './connectors/obsidian.js';
@@ -887,8 +887,9 @@ route('PUT', '/api/connectors/whatsapp', async (req, res) => {
     if (typeof b.appSecret === 'string' && b.appSecret.trim()) setSetting('whatsapp_app_secret', b.appSecret.trim().slice(0, 200));
     log('info', `WhatsApp connected (${r.number})`);
     notify('settings');
+    const moved = adoptPendingWhatsapp();
     deliverQueued().catch(() => {});
-    send(res, 200, { ok: true, message: r.message });
+    send(res, 200, { ok: true, message: moved ? `${r.message}. ${moved} waiting first contact(s) are now sending on WhatsApp.` : r.message });
   } catch (err) {
     throw new HttpError(400, err.message);
   }

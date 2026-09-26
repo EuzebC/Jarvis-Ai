@@ -10,6 +10,8 @@ const policy = await import('../service/brain/policy.js');
 const ws = await import('../service/brain/workspace.js');
 const { insert, one, now, setSetting } = await import('../service/db.js');
 const wa = await import('../service/connectors/whatsapp.js');
+const { adoptPendingWhatsapp } = await import('../service/outbox.js');
+const { run: dbRun } = await import('../service/db.js');
 const { proposeAction } = await import('../service/brain/proposals.js');
 const { appendLead, readLeads } = await import('../service/brain/tools.js');
 const { createMission, leaderFor, teamAsSubagents } = await import('../service/brain/missions.js');
@@ -152,6 +154,24 @@ test('whatsapp: numbers are normalised, webhook payloads are parsed, inbound mes
   assert.equal(wa.hasWrittenToUs(orgId, '250788123456'), true);
   assert.equal(wa.inServiceWindow('250788123456'), false); // the sample timestamp is old
   assert.equal(policy.routeAction({ kind: 'whatsapp', contactHasReplied: true, level: 'first_contact' }).route, 'auto');
+});
+
+test('whatsapp: first contacts that waited for the owner move to the WhatsApp outbox once it is connected', () => {
+  const task = { id: null, team_id: team.id, org_id: orgId };
+  const r = proposeAction({ scope, task, kind: 'other', summary: 'WhatsApp first contact to Salon Kigali', details: { company: 'Salon Kigali', phone: '+250 78 8000000', body: 'Muraho! Real pitch here.' } });
+  assert.equal(r.route, 'owner');
+  const unrelated = proposeAction({ scope, task, kind: 'other', summary: 'Submit the enquiry form on their website', details: { channel: 'https://example.rw/contact', body: 'Hello' } });
+  assert.equal(unrelated.route, 'owner');
+  setSetting('whatsapp_phone_id', '123');
+  setSetting('whatsapp_token', 'test');
+  assert.equal(adoptPendingWhatsapp(), 1);
+  dbRun(`DELETE FROM settings WHERE key IN ('whatsapp_phone_id', 'whatsapp_token')`); // before the queued delivery runs, so nothing is sent
+  const moved = one('SELECT * FROM approvals WHERE id = ?', r.approvalId);
+  assert.equal(moved.kind, 'whatsapp');
+  assert.equal(moved.status, 'approved');
+  assert.equal(moved.delivery, 'queued');
+  assert.equal(JSON.parse(moved.payload).to, '250788000000');
+  assert.equal(one('SELECT kind, status FROM approvals WHERE id = ?', unrelated.approvalId).kind, 'other');
 });
 
 test('CRM file: leads are appended once, de-duplicated by email or website', () => {
