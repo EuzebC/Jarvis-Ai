@@ -137,6 +137,7 @@ export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) 
     if (res.ok) {
       setSetting(`operator:${orgId}:plan`, JSON.stringify({ mode, at: now(), text: summary }));
       setSetting(`operator:${orgId}:last_${mode}`, today());
+      setSetting(`operator:${orgId}:last_cycle_at`, now()); // any successful run counts as a cycle
       const planFile = path.join(scopeDir(scope), 'journal', `plan-${today()}.md`);
       if (mode !== 'review' && !fs.existsSync(planFile)) fs.writeFileSync(planFile, `# Plan ${today()}\n\n${summary}\n`);
       log('info', `🧠 Jarvis (${mode}): ${summary.split('\n')[0].slice(0, 160)}`, orgId);
@@ -160,7 +161,8 @@ export const currentPlan = (orgId) => {
 // The loop: a morning plan after 7:00, then a new cycle every two hours (7:00–22:00) whenever the
 // organisation has fewer than two open missions, an end-of-day review after 19:00, and a wake-up
 // whenever a mission is delivered. Agents therefore always get new work. Called every few minutes.
-const CYCLE_MS = 2 * 60 * 60_000;
+const CYCLE_MS = 2 * 60 * 60_000; // a fresh look while missions are still running
+const IDLE_MS = 15 * 60_000; // never leave the teams idle longer than this during the day
 export async function operatorTick() {
   if (getSetting('autonomy', '1') !== '1' || scheduler.paused) return;
   const h = new Date().getHours();
@@ -171,19 +173,21 @@ export async function operatorTick() {
     const lastCycle = Number(getSetting(`operator:${org.id}:last_cycle_at`, '0'));
     if (h >= 7 && last('morning') !== today()) await runOperator(org.id, { mode: 'morning' });
     else if (h >= 19 && last('review') !== today()) await runOperator(org.id, { mode: 'review' });
-    else if (h >= 7 && h < 22 && open < 2 && now() - lastCycle > CYCLE_MS) {
+    else if (h >= 7 && h < 22 && ((open === 0 && now() - lastCycle > IDLE_MS) || (open < 2 && now() - lastCycle > CYCLE_MS))) {
       setSetting(`operator:${org.id}:last_cycle_at`, now());
-      await runOperator(org.id, { mode: 'midday', reason: 'next cycle' });
+      await runOperator(org.id, { mode: 'midday', reason: open === 0 ? 'the teams are free' : 'next cycle' });
     }
   }
 }
 
-// Events (a reply arrived, a mission finished) wake the Operator, at most once per 20 minutes per organisation.
+// Events (a reply arrived, a mission finished) wake the Operator: at most once per 20 minutes per organisation,
+// or once per 5 minutes when nothing is running any more, so the teams get new work quickly.
 const lastEvent = new Map();
 export function wakeOperator(orgId, reason) {
   if (!orgId || getSetting('autonomy', '1') !== '1') return;
   const t = lastEvent.get(orgId) ?? 0;
-  if (now() - t < 20 * 60_000) return;
+  const open = one(`SELECT COUNT(*) AS n FROM tasks WHERE org_id = ? AND kind = 'mission' AND status IN ('queued','running')`, orgId).n;
+  if (now() - t < (open === 0 ? 5 : 20) * 60_000) return;
   lastEvent.set(orgId, now());
   runOperator(orgId, { mode: 'event', reason }).catch((err) => log('warn', `Operator event run failed: ${err.message}`, orgId));
 }
