@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, connectLive, disconnectLive, useData, SignedOut } from './api.js';
 import { THEMES, applyPalette } from './theme.js';
 import { voice } from './voice.js';
+import { live } from './live.js';
 import Reactor, { MiniCore, Wave } from './components/Reactor.jsx';
 import { Icon, Toasts, toast } from './components/ui.jsx';
 import { OrgHome, PersonalHome } from './screens/Home.jsx';
@@ -153,10 +154,28 @@ export function useAsk(orgId) {
   return { busy, reply, ask, setReply };
 }
 
-function CommandOverlay({ orgId, onClose, voiceState, speak }) {
+function CommandOverlay({ orgId, onClose, voiceState, speak, liveMode = false, liveState = 'off', core = 'reactor' }) {
   const { busy, reply, ask } = useAsk(orgId);
   const [text, setText] = useState('');
   const [partial, setPartial] = useState('');
+  const [lines, setLines] = useState([]);
+  const [current, setCurrent] = useState({ you: '', jarvis: '' });
+  const [tool, setTool] = useState(null);
+  useEffect(() => {
+    if (!liveMode) return undefined;
+    const onLines = (e) => (setLines(e.detail), setCurrent({ you: '', jarvis: '' }));
+    const onTranscript = (e) => setCurrent((c) => ({ ...c, [e.detail.who]: e.detail.text }));
+    const onTool = (e) => setTool(e.detail.request ? `Asking Jarvis: ${e.detail.request}` : null);
+    live.addEventListener('lines', onLines);
+    live.addEventListener('transcript', onTranscript);
+    live.addEventListener('tool', onTool);
+    return () => {
+      live.removeEventListener('lines', onLines);
+      live.removeEventListener('transcript', onTranscript);
+      live.removeEventListener('tool', onTool);
+    };
+  }, [liveMode]);
+  const liveOn = liveMode && live.state !== 'off';
   useEffect(() => {
     const onPartial = (e) => setPartial(e.detail);
     const onCommand = (e) => {
@@ -171,23 +190,46 @@ function CommandOverlay({ orgId, onClose, voiceState, speak }) {
       voice.removeEventListener('command', onCommand);
     };
   }, [ask, speak]);
-  const state = busy ? 'thinking' : voiceState === 'speaking' ? 'speaking' : 'listening';
+  const state = liveOn ? (liveState === 'thinking' || liveState === 'connecting' ? 'thinking' : liveState === 'speaking' ? 'speaking' : 'listening') : busy ? 'thinking' : voiceState === 'speaking' ? 'speaking' : 'listening';
+  const label = liveOn ? { connecting: 'CONNECTING', listening: 'LISTENING', thinking: 'THINKING', speaking: 'SPEAKING', error: 'VOICE ERROR' }[liveState] ?? 'READY' : busy ? 'THINKING' : voiceState === 'command' ? 'LISTENING' : voiceState === 'speaking' ? 'SPEAKING' : 'READY';
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" style={{ width: 640, alignItems: 'center' }} role="dialog" aria-label="Ask Jarvis">
-        <Reactor size={240} compass={false} state={state} />
-        <div className="row mono" style={{ letterSpacing: '0.3em', color: 'var(--p)' }}>
+        <Reactor size={240} compass={false} state={state} kind={core} />
+        <div className="row mono" style={{ letterSpacing: '0.3em', color: liveState === 'error' ? 'var(--bad)' : 'var(--p)' }}>
           <span className="dot working" />
-          {busy ? 'THINKING' : voiceState === 'command' ? 'LISTENING' : voiceState === 'speaking' ? 'SPEAKING' : 'READY'}
+          {label}
         </div>
-        <Wave active={voiceState === 'command' || voiceState === 'speaking'} />
+        <Wave active={liveOn ? liveState === 'speaking' || liveState === 'listening' : voiceState === 'command' || voiceState === 'speaking'} />
+        {liveMode && liveState === 'error' && <div className="small" style={{ color: 'var(--bad)' }}>{live.message}</div>}
         {partial && <div className="muted mono">{partial}…</div>}
+        {liveOn && (lines.length > 0 || current.you || current.jarvis || tool) && (
+          <div className="col small" style={{ width: '100%', gap: 4, maxHeight: 180, overflow: 'auto' }}>
+            {lines.map((l, i) => (
+              <div key={i} className={l.who === 'you' ? 'muted' : ''}>
+                <b>{l.who === 'you' ? 'You' : 'Jarvis'}:</b> {l.text}
+              </div>
+            ))}
+            {current.you && (
+              <div className="muted">
+                <b>You:</b> {current.you}
+              </div>
+            )}
+            {current.jarvis && (
+              <div>
+                <b>Jarvis:</b> {current.jarvis}
+              </div>
+            )}
+            {tool && liveState === 'thinking' && <div className="faint mono">{tool}</div>}
+          </div>
+        )}
         <form
           className="row"
           style={{ width: '100%' }}
           onSubmit={(e) => {
             e.preventDefault();
-            ask(text, speak && voice.state !== 'off');
+            if (liveOn && live.sendText(text)) setText('');
+            else ask(text, speak && voice.state !== 'off');
           }}
         >
           <input className="input grow" value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask or tell Jarvis anything…" autoFocus aria-label="Command" />
@@ -216,6 +258,8 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [voiceState, setVoiceState] = useState('off');
+  const [liveState, setLiveState] = useState('off');
+  const activateRef = useRef(null);
   const [clock, setClock] = useState(() => new Date());
   const [retintColor, setRetintColor] = useState(null);
 
@@ -262,27 +306,43 @@ export default function App() {
     if (!inside) setRetintColor(null);
   }, [inside]);
 
-  // Voice: wake word + Ctrl+Space.
+  // Voice: wake word + Ctrl+Space, and the Gemini Live session when that engine is chosen.
   useEffect(() => {
     const on = (e) => setVoiceState(e.detail.state);
-    const onWake = () => setCommandOpen(true);
+    const onWake = () => activateRef.current?.();
+    const onLive = (e) => {
+      setLiveState(e.detail.state);
+      if (e.detail.state === 'off' || e.detail.state === 'error') voice.resume();
+      else voice.pause();
+    };
     voice.addEventListener('state', on);
     voice.addEventListener('wake', onWake);
+    live.addEventListener('state', onLive);
     return () => {
       voice.removeEventListener('state', on);
       voice.removeEventListener('wake', onWake);
+      live.removeEventListener('state', onLive);
     };
   }, []);
+  useEffect(() => {
+    if (!commandOpen && live.active) live.stop();
+  }, [commandOpen]);
   useEffect(() => {
     if (!authed || !settings.data) return;
     if (settings.data.voice_wake && voice.state === 'off') voice.start({ wake: true });
     if (!settings.data.voice_wake && voice.state !== 'off') voice.stop();
   }, [authed, settings.data]);
+  const liveMode = settings.data?.voice_engine === 'gemini' && Boolean(settings.data?.geminiKeySet);
   const activate = useCallback(() => {
     setCommandOpen(true);
+    if (liveMode) {
+      if (!live.active) live.start({ orgId: workspace === 'org' ? orgId : null });
+      return;
+    }
     if (voice.state === 'off') voice.start({ wake: settings.data?.voice_wake ?? false }).then(() => voice.listenForCommand());
     else voice.listenForCommand();
-  }, [settings.data]);
+  }, [settings.data, liveMode, workspace, orgId]);
+  activateRef.current = activate;
   useEffect(() => {
     const onKey = (e) => {
       if (e.ctrlKey && e.code === 'Space') {
@@ -393,7 +453,7 @@ export default function App() {
       </header>
       <main className="page">{screen}</main>
       {commandOpen && (
-        <CommandOverlay
+        <CommandOverlay liveMode={liveMode} liveState={liveState} core={settings.data?.core ?? 'reactor'}
           orgId={ctx.orgId}
           voiceState={voiceState}
           speak={settings.data?.voice_speak !== false}

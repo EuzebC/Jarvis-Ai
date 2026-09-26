@@ -20,13 +20,20 @@ import { testHubspot } from './connectors/hubspot.js';
 import { testGmail } from './connectors/gmail.js';
 import { testWhatsapp, verifyToken, signatureValid, whatsappConnected, whatsappDailyLimit, whatsappSentToday } from './connectors/whatsapp.js';
 import { deliverQueued, dailyLimit, sentToday, receiveWhatsapp, migratePendingActions, requeueForConnector, waitingForConnectors } from './outbox.js';
-import { orgDir, suggestOrgFolder, moveOrgWorkspace, ensureWorkspace } from './brain/workspace.js';
+import { orgDir, suggestOrgFolder, moveOrgWorkspace, ensureWorkspace, scopeDir } from './brain/workspace.js';
+import { undo as undoCommits, filesIn } from './brain/history.js';
+import { remoteStatus, startTunnel, stopTunnel, installCloudflared, defaultCommand } from './remote.js';
+import QRCode from 'qrcode';
+import { VOICES, DEFAULT_VOICE, DEFAULT_LIVE_MODEL } from './voice/live.js';
 import { LEVELS, approvalSentence } from './brain/policy.js';
 import { defaultVault, initVault, syncMinds, writeBriefing } from './connectors/obsidian.js';
 import { listBlocked, blockContact, unblock } from './optout.js';
 
 const COOKIE = 'jarvis_session';
-const cookie = (token, maxAge) => `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+const cookie = (token, maxAge, secure = false) => `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
+// Behind the remote-access tunnel the real client address and scheme arrive in headers.
+const clientIp = (req) => String(req.headers['cf-connecting-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0] || req.socket.remoteAddress).trim();
+const viaHttps = (req) => String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 const parseApproval = (a) => ({ ...a, payload: JSON.parse(a.payload || '{}') });
 const orgParam = (q) => (q.get('org') ? id(q.get('org')) : null);
 
@@ -69,7 +76,7 @@ route(
   'POST',
   '/api/login',
   async (req, res) => {
-    const ip = req.socket.remoteAddress;
+    const ip = clientIp(req);
     if (!auth.loginAllowed(ip)) throw new HttpError(429, 'Too many attempts. Wait 15 minutes.');
     const { password, client } = await readJson(req);
     if (!auth.checkPassword(String(password ?? ''))) {
@@ -78,7 +85,7 @@ route(
     }
     auth.clearFailures(ip);
     const token = auth.createSession(req.headers['user-agent']);
-    send(res, 200, client === 'app' ? { ok: true, token } : { ok: true }, { 'Set-Cookie': cookie(token, 30 * 86400) });
+    send(res, 200, client === 'app' ? { ok: true, token } : { ok: true }, { 'Set-Cookie': cookie(token, 30 * 86400, viaHttps(req)) });
   },
   { open: true },
 );
@@ -615,6 +622,7 @@ route('GET', '/api/tasks/:id', (req, res, ctx) => {
     agent: t.agent_id ? one('SELECT id, name, role, tier FROM agents WHERE id = ?', t.agent_id) : null,
     children: all('SELECT t.id, t.title, t.status, a.name AS agent_name FROM tasks t LEFT JOIN agents a ON a.id = t.agent_id WHERE parent_id = ? ORDER BY t.id', t.id),
     approvals: all('SELECT * FROM approvals WHERE task_id = ?', t.id).map(parseApproval),
+    canUndo: Boolean(t.commits && JSON.parse(t.commits).length && !t.undone_at && !['queued', 'running'].includes(t.status)),
     files: all(`SELECT * FROM files WHERE task_id = ? AND rel_path NOT LIKE 'knowledge/%'`, t.id),
   });
 });
@@ -627,6 +635,52 @@ route('POST', '/api/tasks/:id/retry', (req, res, ctx) => {
   scheduler.retry(id(ctx.params.id));
   send(res, 200, { ok: true });
 });
+
+// Undo: reverts every file change a mission made in the organisation folder (a new commit, nothing is lost).
+route('POST', '/api/tasks/:id/undo', (req, res, ctx) => {
+  const t = mustExist('tasks', id(ctx.params.id), 'Task');
+  const shas = JSON.parse(t.commits || '[]');
+  if (!shas.length) throw new HttpError(400, 'This mission made no file changes that can be undone');
+  if (t.undone_at) throw new HttpError(400, 'Already undone');
+  if (['queued', 'running'].includes(t.status)) throw new HttpError(400, 'Cancel the mission first');
+  const dir = scopeDir({ orgId: t.org_id });
+  try {
+    const sha = undoCommits(dir, shas, `Undo mission #${t.id}: ${t.title}`);
+    run('UPDATE tasks SET undone_at = ? WHERE id = ?', now(), t.id);
+    log('info', `↶ Undid mission #${t.id}: ${t.title}`, t.org_id);
+    notify('tasks', { orgId: t.org_id });
+    send(res, 200, { ok: true, files: sha ? filesIn(dir, sha) : [] });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+});
+
+// ---------- remote access (phone) ----------
+route('GET', '/api/remote', async (req, res) => {
+  const st = remoteStatus();
+  let qr = null;
+  if (st.publicUrl) {
+    try {
+      qr = await QRCode.toDataURL(st.publicUrl, { margin: 1, width: 220, color: { dark: '#39e58c', light: '#00000000' } });
+    } catch {
+      // no QR
+    }
+  }
+  send(res, 200, { ...st, defaultCommand: defaultCommand(), qr });
+});
+route('PUT', '/api/remote', async (req, res) => {
+  const b = await readJson(req);
+  if (typeof b.command === 'string') setSetting('tunnel_cmd', b.command.trim().slice(0, 300));
+  if (typeof b.publicUrl === 'string') setSetting('public_url', b.publicUrl.trim().replace(/\/+$/, '').slice(0, 300));
+  if (typeof b.enabled === 'boolean') {
+    setSetting('remote_enabled', b.enabled ? '1' : '0');
+    if (b.enabled) startTunnel();
+    else stopTunnel();
+  }
+  notify('settings');
+  send(res, 200, { ok: true, ...remoteStatus() });
+});
+route('POST', '/api/remote/install', async (req, res) => send(res, 200, await installCloudflared()));
 
 // ---------- approvals & outbox ----------
 route('GET', '/api/approvals', (req, res, ctx) => {
@@ -740,6 +794,11 @@ route('GET', '/api/settings', (req, res) => {
     voice_speak: getSetting('voice_speak', '1') === '1',
     autonomy: getSetting('autonomy', '1') === '1',
     approval_level: getSetting('approval_level', 'payments'),
+    voice_engine: getSetting('voice_engine', 'browser'),
+    geminiKeySet: Boolean(getSetting('gemini_api_key')),
+    gemini_voice: getSetting('gemini_voice', DEFAULT_VOICE),
+    gemini_live_model: getSetting('gemini_live_model', DEFAULT_LIVE_MODEL),
+    gemini_voices: VOICES,
     approval_sentence: approvalSentence(getSetting('approval_level', 'payments')),
     ownerProfile: getSetting('owner_profile', ''),
     apiKeySet: Boolean(getSetting('anthropic_api_key')),
@@ -756,6 +815,15 @@ route('PUT', '/api/settings', async (req, res) => {
     if (typeof b[k] === 'string') setSetting(k, b[k].slice(0, 40));
     if (typeof b[k] === 'boolean') setSetting(k, b[k] ? '1' : '0');
   }
+  if (typeof b.geminiApiKey === 'string') {
+    const k = b.geminiApiKey.trim();
+    if (k) setSetting('gemini_api_key', k.slice(0, 200));
+    else run(`DELETE FROM settings WHERE key = 'gemini_api_key'`);
+    log('info', k ? 'Gemini key saved' : 'Gemini key removed');
+  }
+  if (b.voice_engine === 'browser' || b.voice_engine === 'gemini') setSetting('voice_engine', b.voice_engine);
+  if (typeof b.gemini_voice === 'string' && VOICES.includes(b.gemini_voice)) setSetting('gemini_voice', b.gemini_voice);
+  if (typeof b.gemini_live_model === 'string' && b.gemini_live_model.trim()) setSetting('gemini_live_model', b.gemini_live_model.trim().slice(0, 80));
   if (typeof b.approval_level === 'string' && LEVELS.includes(b.approval_level)) {
     setSetting('approval_level', b.approval_level);
     log('info', approvalSentence(b.approval_level));

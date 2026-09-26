@@ -7,6 +7,10 @@ export default function TaskView({ id }) {
   const t = task.data;
   if (!t) return null;
   const act = (verb) => api('POST', `/api/tasks/${t.id}/${verb}`).then(() => toast(verb === 'retry' ? 'Queued again' : 'Cancelled'));
+  const undo = () =>
+    api('POST', `/api/tasks/${t.id}/undo`)
+      .then((r) => (toast(r.files?.length ? `Undone: ${r.files.length} file(s) restored` : 'Undone'), task.reload()))
+      .catch((e) => toast(e.message, true));
   return (
     <div className="page-pad col" style={{ gap: 16, maxWidth: 1000, margin: '0 auto' }}>
       <button type="button" className="linkbtn" style={{ alignSelf: 'flex-start' }} onClick={() => history.back()}>
@@ -25,6 +29,12 @@ export default function TaskView({ id }) {
               Retry
             </button>
           )}
+          {t.canUndo && (
+            <button type="button" className="btn small" onClick={undo} title="Reverts every file this mission changed in the organisation folder (kept in history)">
+              Undo file changes
+            </button>
+          )}
+          {t.undone_at && <span className="mono small muted">UNDONE</span>}
         </div>
       </div>
       <div className="row small muted" style={{ flexWrap: 'wrap' }}>

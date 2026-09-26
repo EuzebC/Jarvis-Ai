@@ -12,6 +12,7 @@ export const CORES = {
   radar: { name: 'Radar Sweep', note: 'Blips are live agents' },
   sphere: { name: 'Particle Sphere', note: 'Pulses with the voice' },
   pulse: { name: 'Pulse Core', note: 'Minimal and calm' },
+  face: { name: 'Holographic Face', note: 'Speaks with lip-sync' },
 };
 
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));

@@ -5,6 +5,7 @@ import Reactor from '../components/Reactor.jsx';
 import { Switch, toast } from '../components/ui.jsx';
 import { voice } from '../voice.js';
 import Connectors from './Connectors.jsx';
+import RemoteCard from './RemoteCard.jsx';
 
 const desktop = window.jarvisDesktop;
 
@@ -18,6 +19,7 @@ export default function Settings({ ctx, reload, focus = null }) {
   const s = ctx.settings;
   const login = useData('/api/engines/login');
   const [apiKey, setApiKey] = useState('');
+  const [gemKey, setGemKey] = useState('');
   const [cap, setCap] = useState('');
   const [autoStart, setAutoStart] = useState(null);
   useEffect(() => {
@@ -55,7 +57,7 @@ export default function Settings({ ctx, reload, focus = null }) {
 
       <section className="col" style={{ gap: 10 }}>
         <span className="label">▶ Core animation</span>
-        <div className="grid g4">
+        <div className="grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
           {Object.entries(CORES).map(([key, c]) => (
             <button key={key} type="button" onClick={() => save({ core: key }, `${c.name} core`)} className={`panel col ${s.core === key ? 'hot' : ''}`} style={{ alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--text)' }}>
               <Reactor size={110} compass={false} kind={key} agents={6} />
@@ -95,6 +97,53 @@ export default function Settings({ ctx, reload, focus = null }) {
               Test voice
             </button>
             <span className="mono small muted">STATUS: {ctx.voiceState.toUpperCase()}</span>
+          </div>
+          <div className="col" style={{ gap: 8, borderTop: '1px solid var(--line-soft)', paddingTop: 12 }}>
+            <div>Voice engine</div>
+            <label className="row" style={{ alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+              <input type="radio" name="voice_engine" checked={(s.voice_engine ?? 'browser') === 'browser'} onChange={() => save({ voice_engine: 'browser' }, 'Offline voice')} style={{ marginTop: 4 }} />
+              <span>
+                <b>Offline (built in)</b> <span className="muted small">Local speech recognition and Windows voices. Answers come from Jarvis’s brain.</span>
+              </span>
+            </label>
+            <label className="row" style={{ alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+              <input type="radio" name="voice_engine" checked={s.voice_engine === 'gemini'} onChange={() => save({ voice_engine: 'gemini' }, s.geminiKeySet ? 'Gemini Live voice' : 'Gemini Live voice: add a key below')} style={{ marginTop: 4 }} />
+              <span>
+                <b>Gemini Live (real-time conversation)</b> <span className="muted small">A natural voice you can interrupt; it asks Jarvis’s brain for everything about the organisation. Needs a Gemini API key.</span>
+              </span>
+            </label>
+            <form
+              className="row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                save({ geminiApiKey: gemKey }, 'Gemini key saved');
+                setGemKey('');
+              }}
+            >
+              <input className="input grow" type="password" value={gemKey} onChange={(e) => setGemKey(e.target.value)} placeholder={s.geminiKeySet ? 'Replace Gemini key…' : 'Gemini API key'} aria-label="Gemini API key" autoComplete="off" />
+              <button className="btn" disabled={!gemKey}>
+                Save key
+              </button>
+            </form>
+            <div className="grid g2" style={{ gap: 8 }}>
+              <label className="field">
+                <span>Voice</span>
+                <select className="input" value={s.gemini_voice} onChange={(e) => save({ gemini_voice: e.target.value }, `Voice: ${e.target.value}`)}>
+                  {(s.gemini_voices ?? []).map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Live model</span>
+                <input className="input" defaultValue={s.gemini_live_model} onBlur={(e) => e.target.value.trim() && e.target.value !== s.gemini_live_model && save({ gemini_live_model: e.target.value }, 'Model saved')} />
+              </label>
+            </div>
+            <div className="small faint" style={{ lineHeight: 1.6 }}>
+              Create a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style={{ color: 'var(--p)' }}>aistudio.google.com/apikey</a> and paste it here, never in a chat. It stays on this PC. {s.geminiKeySet ? 'Key set: press Ctrl+Space or say “Jarvis” to talk.' : ''}
+            </div>
           </div>
           <div className="small faint">Shortcut: Ctrl+Space from anywhere{desktop ? ' (even when Jarvis is in the background)' : ''}.</div>
         </section>
@@ -171,6 +220,8 @@ export default function Settings({ ctx, reload, focus = null }) {
       </section>
 
       <Connectors orgId={ctx.orgId} focus={focus} />
+
+      <RemoteCard />
 
       <section className="panel col" style={{ gap: 12 }}>
         <span className="label">▶ This computer</span>

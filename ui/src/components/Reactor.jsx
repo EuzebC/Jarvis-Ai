@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import Face from './Face.jsx';
 
 // The Jarvis core. `kind` is the animation style from Settings; `state` reflects the voice:
 // listening (calm), thinking (faster spin), speaking (pulsing + waveform).
@@ -91,6 +92,7 @@ function Pulse({ speed }) {
 }
 
 export default function Reactor({ size = 600, kind = 'reactor', state = 'listening', compass = true, agents = 0 }) {
+  if (kind === 'face') return <Face size={size} state={state} agents={agents} />;
   const speed = state === 'speaking' ? 2.4 : state === 'thinking' ? 1.8 : 1;
   const dots = useMemo(() => {
     const out = [];

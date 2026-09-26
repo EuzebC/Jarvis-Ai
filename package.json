@@ -24,9 +24,11 @@
     "@playwright/mcp": "^0.0.82",
     "imapflow": "^2.0.7",
     "nodemailer": "^10.0.10",
+    "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "vosk-browser": "^0.0.8"
+    "vosk-browser": "^0.0.8",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.1",

@@ -12,6 +12,8 @@ import { operatorTick, wakeOperator } from './brain/operator.js';
 import { ensurePersonalAgents, ensureOrgJarvis } from './agents.js';
 import { deliverQueued, checkReplies, followUp, migratePendingActions } from './outbox.js';
 import { adoptFolders } from './brain/workspace.js';
+import { resumeTunnel, stopTunnel } from './remote.js';
+import { attachLiveVoice } from './voice/live.js';
 import { syncMinds, writeBriefing } from './connectors/obsidian.js';
 
 const MIME = {
@@ -96,6 +98,7 @@ const migrated = migratePendingActions();
 if (migrated) log('info', `${migrated} waiting item(s) brought in line with the current policy`);
 
 const server = http.createServer((req, res) => handle(req, res).catch(() => !res.headersSent && send(res, 500, { error: 'Internal error' })));
+attachLiveVoice(server);
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`Port ${config.port} is busy: Jarvis is probably already running.`);
@@ -127,10 +130,12 @@ server.listen(config.port, config.host, () => {
   setInterval(obsidianTick, 5 * 60_000).unref();
   pruneEvents();
   setInterval(pruneEvents, 86_400_000).unref();
+  resumeTunnel();
 });
 
 function shutdown() {
   scheduler.stop();
+  stopTunnel();
   server.close();
   setTimeout(() => process.exit(0), 500).unref();
 }

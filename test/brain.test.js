@@ -12,6 +12,7 @@ const { insert, one, now, setSetting } = await import('../service/db.js');
 const wa = await import('../service/connectors/whatsapp.js');
 const { migratePendingActions, requeueForConnector } = await import('../service/outbox.js');
 const { releaseReviewed } = await import('../service/brain/proposals.js');
+const await_history = await import('../service/brain/history.js');
 const { run: dbRun } = await import('../service/db.js');
 const { proposeAction } = await import('../service/brain/proposals.js');
 const { appendLead, readLeads } = await import('../service/brain/tools.js');
@@ -245,4 +246,22 @@ test('missions: targets resolve to their leader, teams become subagents, mission
   assert.equal(m.dod, 'crm/leads.csv has 5 rows');
   assert.equal(JSON.parse(m.target).type, 'team');
   assert.throws(() => createMission({ scope, target: 'team:nowhere', title: 'x' }), /No team named/);
+});
+
+test('history: a mission leaves git snapshots and undo restores the files in a new commit', () => {
+  const history = await_history;
+  const dir = fs.mkdtempSync(path.join(process.env.JARVIS_DATA_DIR, 'hist-'));
+  fs.writeFileSync(path.join(dir, 'existing.md'), 'owner file');
+  assert.equal(history.snapshot(dir, 'Before mission #1'), null); // the initial snapshot already holds existing.md
+  fs.writeFileSync(path.join(dir, 'report.md'), 'made by the mission');
+  fs.writeFileSync(path.join(dir, 'existing.md'), 'changed by the mission');
+  const sha = history.snapshot(dir, 'Mission #1');
+  assert.ok(sha);
+  assert.deepEqual(history.filesIn(dir, sha).sort(), ['existing.md', 'report.md']);
+  fs.writeFileSync(path.join(dir, 'later.md'), 'work after the mission stays');
+  const undone = history.undo(dir, [sha], 'Undo mission #1');
+  assert.ok(undone);
+  assert.equal(fs.existsSync(path.join(dir, 'report.md')), false);
+  assert.equal(fs.readFileSync(path.join(dir, 'existing.md'), 'utf8'), 'owner file');
+  assert.equal(fs.readFileSync(path.join(dir, 'later.md'), 'utf8'), 'work after the mission stays');
 });

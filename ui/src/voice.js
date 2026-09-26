@@ -15,6 +15,7 @@ class Voice extends EventTarget {
   stream = null;
   mode = 'wake';
   wakeEnabled = true;
+  paused = false; // a Gemini Live session owns the microphone; the wake word waits
 
   emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
@@ -43,7 +44,7 @@ class Voice extends EventTarget {
       const source = this.ctx.createMediaStreamSource(this.stream);
       const node = this.ctx.createScriptProcessor(4096, 1, 1);
       node.onaudioprocess = (e) => {
-        if (this.state === 'speaking') return; // don't transcribe our own voice
+        if (this.state === 'speaking' || this.paused) return; // don't transcribe our own voice, or a live session
         try {
           if (this.mode === 'command') this.command.acceptWaveform(e.inputBuffer);
           else if (this.wakeEnabled) this.wake.acceptWaveform(e.inputBuffer);
@@ -84,6 +85,15 @@ class Voice extends EventTarget {
     this.mode = 'wake';
     this.setState('listening');
     this.emit('command', clean);
+  }
+
+  pause() {
+    this.paused = true;
+    if (this.mode === 'command') this.cancelCommand();
+  }
+
+  resume() {
+    this.paused = false;
   }
 
   cancelCommand() {

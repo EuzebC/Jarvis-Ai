@@ -16,6 +16,7 @@ import { jarvisTools, recordActivity } from './tools.js';
 import { ensureWorkspace, writeClaudeMd, readMemory } from './workspace.js';
 import { hasPlaceholders } from './policy.js';
 import { releaseReviewed, reviewItems } from './proposals.js';
+import { snapshot } from './history.js';
 
 const MAX_ROUNDS = 3;
 // Two Claude sessions at a time: enough to keep departments moving without draining the 5-hour window in one burst.
@@ -329,6 +330,7 @@ class Scheduler {
     }
     const subagents = teamAsSubagents(leader);
     const prompt = missionPrompt(task, leader, subagents) + memorySnippet(scope);
+    snapshot(root, `Before mission #${task.id}: ${task.title}`);
     const runId = insert('INSERT INTO runs (task_id, provider, model, started_at) VALUES (?, ?, ?, ?)', task.id, engine, engine === 'claude' ? MODEL_OF(leader) : null, startedAt);
     const onProgress = (ev) => {
       if (ev.kind === 'tool') recordActivity({ scope, task, agent: ev.subagent ? `${leader.name} › ${ev.subagent}` : leader.name, kind: 'tool', text: ev.text });
@@ -368,7 +370,9 @@ class Scheduler {
       return this.finish(task.id, 'failed', res.error || outcome);
     }
 
-    // Delivered: register files, verify, and either accept or send it back with feedback.
+    // Delivered: snapshot the folder, register files, verify, and either accept or send it back with feedback.
+    const sha = snapshot(root, `Mission #${task.id} (round ${task.round}): ${task.title}`);
+    if (sha) run('UPDATE tasks SET commits = ? WHERE id = ?', JSON.stringify([...JSON.parse(one('SELECT commits FROM tasks WHERE id = ?', task.id).commits || '[]'), sha]), task.id);
     const files = changedFiles(root, startedAt);
     registerFiles(scope, task.id, files);
     run(`UPDATE tasks SET result = ?, summary = ?, live_status = 'verifying' WHERE id = ?`, res.text, res.text.split('\n').find((l) => l.trim())?.slice(0, 300) ?? '', task.id);
