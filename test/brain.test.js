@@ -178,13 +178,16 @@ test('outbox: messages wait for a missing connector and go out when it is connec
   // Legacy rows from the old policy are migrated at start.
   const legacy = insert(`INSERT INTO approvals (org_id, kind, summary, payload, status, created_at) VALUES (?, 'other', 'WhatsApp first contact to X', ?, 'pending', ?)`, orgId, JSON.stringify({ phone: '+250788111222', body: 'Muraho, a real message body for the salon.' }), now());
   const call = insert(`INSERT INTO approvals (org_id, kind, summary, payload, status, created_at) VALUES (?, 'call', 'Call Y', '{}', 'pending', ?)`, orgId, now());
-  assert.equal(migratePendingActions(), 2);
+  const ownerApproved = insert(`INSERT INTO approvals (org_id, kind, summary, payload, status, decided_by, delivery, created_at) VALUES (?, 'other', 'WhatsApp first contact to Z', ?, 'approved', 'owner', 'manual', ?)`, orgId, JSON.stringify({ phone: '+250788555666', body: 'Muraho, another real message body for a salon.' }), now());
+  assert.equal(migratePendingActions(), 3);
+  assert.equal(one('SELECT kind, delivery FROM approvals WHERE id = ?', ownerApproved).kind, 'whatsapp');
+  assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', ownerApproved).delivery, 'needs_connector');
   assert.equal(one('SELECT kind, status, delivery FROM approvals WHERE id = ?', legacy).delivery, 'needs_connector');
   assert.equal(one('SELECT status FROM approvals WHERE id = ?', call).status, 'rejected');
   // Connecting WhatsApp releases everything that waited for it.
   setSetting('whatsapp_phone_id', '123');
   setSetting('whatsapp_token', 'test');
-  assert.equal(requeueForConnector('whatsapp'), 2);
+  assert.equal(requeueForConnector('whatsapp'), 3);
   dbRun(`DELETE FROM settings WHERE key IN ('whatsapp_phone_id', 'whatsapp_token')`); // before the queued delivery runs, so nothing is sent
   assert.equal(one('SELECT delivery FROM approvals WHERE id = ?', r.approvalId).delivery, 'queued');
 });

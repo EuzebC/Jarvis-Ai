@@ -83,9 +83,16 @@ export function migratePendingActions() {
     }
     n++;
   }
-  // Approved messages that were marked "send it yourself" now wait for their connector.
-  for (const a of all(`SELECT * FROM approvals WHERE status = 'approved' AND delivery = 'manual' AND kind IN ('email', 'proposal', 'whatsapp')`)) {
-    routeApproved(a);
+  // Approved messages that were marked "send it yourself" now wait for their connector; owner-approved
+  // "other" items that are really WhatsApp messages join the WhatsApp queue.
+  for (const a of all(`SELECT * FROM approvals WHERE status = 'approved' AND (delivery = 'manual' OR delivery IS NULL) AND kind IN ('email', 'proposal', 'whatsapp', 'other', 'call')`)) {
+    const d = JSON.parse(a.payload || '{}');
+    if (a.kind === 'other' || a.kind === 'call') {
+      const phone = normalisePhone(d.phone || d.channel || '');
+      if (!phone || !d.body) continue;
+      run(`UPDATE approvals SET kind = 'whatsapp', payload = ? WHERE id = ?`, JSON.stringify({ ...d, to: phone }), a.id);
+    }
+    routeApproved(one('SELECT * FROM approvals WHERE id = ?', a.id));
     n++;
   }
   if (n) notify('approvals');
