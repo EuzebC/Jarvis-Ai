@@ -7,11 +7,15 @@ import { log, notify } from './events.js';
 const OPT_OUT = /\b(unsubscribe|opt[\s-]?out|stop (?:emailing|contacting|messaging)|remove me|take me off|do not (?:contact|email)|don'?t (?:contact|email)|not interested|no,? thank(?:s| you)|stop)\b/i;
 export const isOptOut = (text) => OPT_OUT.test(String(text ?? '').slice(0, 600));
 
-const clean = (email) => String(email ?? '').trim().toLowerCase();
+// Entries are email addresses or phone numbers (digits only, international format).
+const clean = (contact) => {
+  const s = String(contact ?? '').trim().toLowerCase();
+  return s.includes('@') ? s : s.replace(/[^\d]/g, '');
+};
 
 export function blockContact({ orgId = null, email, reason = '', source = 'owner' }) {
   const e = clean(email);
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) throw new Error('That is not a valid email address');
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) && !/^\d{8,15}$/.test(e)) throw new Error('That is not a valid email address or phone number');
   run(
     'INSERT INTO do_not_contact (org_id, email, reason, source, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
     orgId,

@@ -12,6 +12,8 @@ import { writeClaudeMd, readMemory, scopeDir } from './workspace.js';
 import { createMission, scheduler } from './missions.js';
 import { syncKnowledge } from '../connectors/obsidian.js';
 import { readLeads } from './tools.js';
+import { approvalSentence } from './policy.js';
+import { whatsappConnected } from '../connectors/whatsapp.js';
 
 const runningFor = new Set();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -49,7 +51,8 @@ export function situation(orgId) {
   lines.push(`OUTREACH LAST 24H: ${sent} sent, ${replies.length} replies${replies.length ? '\n' + replies.map((r) => `- ${r.from_email}: ${r.body}`).join('\n') : ''}`);
   const leads = readLeads({ orgId });
   lines.push(`CRM: ${leads.length} leads (${leads.filter((l) => l.status === 'new').length} new)`);
-  lines.push(`CONNECTORS: Gmail ${getSetting('gmail_address') ? 'connected' : 'not connected'}, HubSpot ${getSetting('hubspot_token') ? 'connected' : 'not connected'}`);
+  lines.push(`CONNECTORS: Gmail ${getSetting('gmail_address') ? 'connected' : 'not connected'}, WhatsApp ${whatsappConnected() ? 'connected' : 'not connected'}, HubSpot ${getSetting('hubspot_token') ? 'connected' : 'not connected'}`);
+  lines.push(`WORKSPACE FOLDER: ${scopeDir({ orgId })}`);
   return lines.join('\n');
 }
 
@@ -70,12 +73,13 @@ ${readMemory({ orgId }).slice(0, 5000)}
 
 YOUR JOB AS OPERATOR:
 1. Compare the state with the goals and KPIs. Find the biggest gap that moves revenue or a customer forward.
-2. Create missions with the delegate tool for the departments/teams that own that work: 2 to 5 missions, each with complete instructions and a measurable definition of done (file names, counts, actions to propose). Do not create missions that duplicate open ones. Prefer missions that end in proposed actions (proposals sent, leads contacted, deliverables made) over more research.
-3. If a mission failed or was sent back, decide whether to re-run it differently, split it, or drop it.
-4. Update goal progress with update_goal where the facts justify it.
-5. Write journal/plan-${today()}.md (overwrite if it exists): today's objectives, the missions you created (with ids), risks, and what the owner should look at. Keep it under 300 words.
-6. Finish with a short spoken-style summary for the owner (3 to 5 sentences): what the organisation is doing today and what needs their attention. No questions.
-Rules: never ask the owner what to do; the owner only approves money, contracts, deletions and first contact. If connectors are missing, work around it (leads still go to the CRM; drafts still get proposed).`;
+2. Create missions with the delegate tool for the departments/teams that own that work: 2 to 5 missions, each with complete instructions and a measurable definition of done (file names, counts, actions to propose). Do not create missions that duplicate open ones. Prefer missions that end in actions (messages sent, leads contacted, products built, deliverables made) over more research.
+3. If no existing department or team owns work the goals need (a product to build, a market to serve, support to run), create it with create_department or create_team and delegate to it in the same run. Keep the structure lean: one new unit at a time, with a clear KPI.
+4. If a mission failed or was sent back, decide whether to re-run it differently, split it, or drop it.
+5. Update goal progress with update_goal where the facts justify it.
+6. Write journal/plan-${today()}.md (overwrite if it exists): today's objectives, the missions you created (with ids), risks, and what the owner should look at. Keep it under 300 words.
+7. Finish with a short spoken-style summary for the owner (3 to 5 sentences): what the organisation is doing today and what needs their attention. No questions.
+Rules: never ask the owner what to do. ${approvalSentence(getSetting('approval_level', 'payments'))} You run in a loop: as soon as missions are delivered you are woken again, so always leave the teams with the next concrete work. If connectors are missing, work around it (leads still go to the CRM; messages still get proposed and wait in the Outbox).`;
 }
 
 export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) {
@@ -153,19 +157,24 @@ export const currentPlan = (orgId) => {
   }
 };
 
-// Schedule: morning plan after 7:00, a mid-day check around 13:00 when nothing is running,
-// an end-of-day review after 19:00. Called every few minutes by the server.
+// The loop: a morning plan after 7:00, then a new cycle every two hours (7:00–22:00) whenever the
+// organisation has fewer than two open missions, an end-of-day review after 19:00, and a wake-up
+// whenever a mission is delivered. Agents therefore always get new work. Called every few minutes.
+const CYCLE_MS = 2 * 60 * 60_000;
 export async function operatorTick() {
   if (getSetting('autonomy', '1') !== '1' || scheduler.paused) return;
   const h = new Date().getHours();
   for (const org of all('SELECT id FROM orgs WHERE archived = 0')) {
     if (!one(`SELECT id FROM departments WHERE org_id = ?`, org.id)) continue; // nothing to run yet
     const last = (mode) => getSetting(`operator:${org.id}:last_${mode}`, '');
+    const open = one(`SELECT COUNT(*) AS n FROM tasks WHERE org_id = ? AND kind = 'mission' AND status IN ('queued','running')`, org.id).n;
+    const lastCycle = Number(getSetting(`operator:${org.id}:last_cycle_at`, '0'));
     if (h >= 7 && last('morning') !== today()) await runOperator(org.id, { mode: 'morning' });
-    else if (h >= 13 && h < 19 && last('midday') !== today()) {
-      const open = one(`SELECT COUNT(*) AS n FROM tasks WHERE org_id = ? AND kind = 'mission' AND status IN ('queued','running')`, org.id).n;
-      if (open === 0) await runOperator(org.id, { mode: 'midday' });
-    } else if (h >= 19 && last('review') !== today()) await runOperator(org.id, { mode: 'review' });
+    else if (h >= 19 && last('review') !== today()) await runOperator(org.id, { mode: 'review' });
+    else if (h >= 7 && h < 22 && open < 2 && now() - lastCycle > CYCLE_MS) {
+      setSetting(`operator:${org.id}:last_cycle_at`, now());
+      await runOperator(org.id, { mode: 'midday', reason: 'next cycle' });
+    }
   }
 }
 

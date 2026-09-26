@@ -150,6 +150,13 @@ addColumn('tasks', 'session_id', 'TEXT');
 addColumn('tasks', 'live_status', 'TEXT');
 addColumn('tasks', 'target', 'TEXT'); // JSON {type: org|department|team|agent|personal, id}
 addColumn('approvals', 'route', 'TEXT'); // owner | leader | auto
+addColumn('orgs', 'workspace_path', 'TEXT'); // the organisation's folder on the owner's PC (optional)
+db.exec(`CREATE TABLE IF NOT EXISTS wa_messages (
+  id INTEGER PRIMARY KEY, org_id INTEGER REFERENCES orgs(id) ON DELETE CASCADE, team_id INTEGER, approval_id INTEGER,
+  direction TEXT NOT NULL, phone TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+  wa_id TEXT UNIQUE, mode TEXT NOT NULL DEFAULT 'text', ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wa_messages_phone ON wa_messages(phone, direction);`);
 db.exec(`
 -- Live feed of what agents are doing right now (tool calls, milestones).
 CREATE TABLE IF NOT EXISTS activity (

@@ -351,6 +351,8 @@ class Scheduler {
       run(`UPDATE tasks SET status = 'done', verify_status = ?, verify_note = ?, live_status = NULL, finished_at = ? WHERE id = ?`, task.dod ? 'passed' : 'skipped', verdict.feedback, now(), task.id);
       log('info', `✔ Mission #${task.id} delivered and verified: ${task.title}${files.length ? ` · ${files.length} file(s)` : ''}`, task.org_id);
       writeReport(one('SELECT * FROM tasks WHERE id = ?', task.id), leader);
+      // A delivered mission wakes the Operator so the next piece of work is planned without waiting for the clock.
+      if (task.org_id) import('./operator.js').then((m) => m.wakeOperator(task.org_id, `mission #${task.id} delivered: ${task.title}`)).catch(() => {});
     } else if (task.round < MAX_ROUNDS) {
       run(`UPDATE tasks SET status = 'queued', round = round + 1, verify_status = 'failed', verify_note = ?, live_status = 'sent back with feedback' WHERE id = ?`, verdict.feedback, task.id);
       log('warn', `↩ Mission #${task.id} sent back (round ${task.round + 1}): ${verdict.feedback.slice(0, 160)}`, task.org_id);

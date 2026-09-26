@@ -1,18 +1,18 @@
 # Jarvis for Windows
 
-Jarvis runs your organisations and personal projects with teams of AI agents, on the **Claude Code and Codex subscriptions** you already pay for. It works on its own: every morning it looks at the goals, decides what the organisation should do, hands out missions, verifies the results, and comes to you only for money, contracts, deletions and the first message to a new contact.
+Jarvis runs your organisations and personal projects with teams of AI agents, on the **Claude Code and Codex subscriptions** you already pay for. It works on its own: every morning it looks at the goals, decides what the organisation should do, hands out missions, verifies the results, and keeps the teams busy all day. By default only payments and purchases wait for you; everything else, including the first message to a new contact, goes out by itself.
 
 ## How Jarvis runs a company
 
-1. **The Operator** (Jarvis) wakes up after 7:00, at mid-day and in the evening, and whenever something happens (a reply, a finished mission). It reads the goals, KPIs, pipeline, replies, the mission board, its memory and your Obsidian notes, then creates 2 to 5 **missions** for departments and teams and writes the day's plan (shown on Home and in Obsidian).
+1. **The Operator** (Jarvis) plans after 7:00, reviews after 19:00, starts a new cycle every two hours while the teams have fewer than two open missions, and wakes up whenever a mission is delivered or a reply arrives. It reads the goals, KPIs, pipeline, replies, the mission board, its memory and your Obsidian notes, then creates 2 to 5 **missions** for departments and teams and writes the day's plan (shown on Home and in Obsidian). When the goals need work nobody owns yet, it creates a department or team itself.
 2. **A mission** is an outcome with a *definition of done* ("crm/leads.csv has 20 verified rows; 10 intro emails proposed"). It runs as one real Claude Code session led by the department head or team leader, who delegates to the team as subagents, does research on the web and in a headless browser, runs code, and saves deliverables in the organisation's workspace.
 3. **Verification.** When the session ends, deterministic checks (files exist, row counts, no placeholders) and a verifier session judge the deliverable. A failed mission is sent back with feedback, up to three rounds. "Done" means delivered.
-4. **Actions leave the company only through `propose_action`.** Policy routes each one: later messages to a contact who replied send automatically; the first message to a new contact goes to you (or to the team leader when you switch that on); money, contracts and deletions always go to you. Questions to the owner are refused: agents decide and note their assumption.
-5. **Delivery.** Approved emails and proposals are sent from Gmail (daily limit), logged in HubSpot with contacts, companies and deals, and replies come back as new missions. Opt-outs are handled automatically.
+4. **Actions leave the company only through `propose_action`.** Settings → Autonomy sets what waits for you: *Payments only* (default), *Money, contracts and deletions*, or additionally *first contacts* (then the team leader can review them instead of you). Payments and purchases always wait for you. Questions to the owner are refused: agents decide and note their assumption.
+5. **Delivery.** Approved emails and proposals are sent from Gmail (daily limit) and WhatsApp messages from your WhatsApp Business number (first contacts as your approved template, free text once they reply). Everything is logged in HubSpot with contacts, companies and deals; replies come back as new missions for the team that started the conversation. Opt-outs ("stop", "not interested") are handled automatically on both channels. Actions with no connector (a form to submit, a call) appear under Approvals as "For you to do".
 
 ## Where agents can and cannot go
 
-Each organisation has one folder under `%LOCALAPPDATA%\Jarvis\orgs\<id>\`:
+Each organisation has its own folder on your PC (by default `D:\JarvisCompanies\<Name>`; choose another when creating it, or move it later from the organisation page). Jarvis has full rights inside that folder and nowhere else:
 
 ```
 CLAUDE.md     the organisation's mind, structure, goals, KPIs, policy and tool guide (generated)
@@ -35,7 +35,7 @@ npm start
 
 First run: create a password in the window. Closing the window keeps the agents working (Jarvis stays in the tray and starts with Windows). Tray → **Quit and stop all agents** stops everything. Reset the password with `npm run set-password`.
 
-**Requirements:** Claude Code signed in (`claude`, then `/login`). Optional: Codex (`codex login`) for building software when Claude is out of quota, an Anthropic API key with a monthly cap as a last resort, HubSpot Service Key, Gmail App Password, Obsidian vault (all in Settings → Connectors).
+**Requirements:** Claude Code signed in (`claude`, then `/login`). Optional: Codex (`codex login`) for building software when Claude is out of quota, an Anthropic API key with a monthly cap as a last resort, HubSpot Service Key, Gmail App Password, WhatsApp Business (phone number ID, permanent token, an approved template, and a public URL such as a Cloudflare or ngrok tunnel for replies), Obsidian vault (all in Settings → Connectors, with step-by-step instructions on each card).
 
 ## Talking to Jarvis
 

@@ -10,6 +10,7 @@ import { notify } from '../events.js';
 import { addMemory } from '../mind.js';
 import { isBlocked } from '../optout.js';
 import { hubspotConnected, addLead as hubspotAddLead } from '../connectors/hubspot.js';
+import { whatsappConnected, recentWhatsapp } from '../connectors/whatsapp.js';
 import { proposeAction, contactHasReplied } from './proposals.js';
 import { KINDS } from './policy.js';
 import { scopeDir } from './workspace.js';
@@ -81,9 +82,9 @@ export function jarvisTools(ctx) {
 
   const propose = tool(
     'propose_action',
-    'The only way anything leaves the company. Proposes an outgoing action; Jarvis routes it by policy (sends it automatically when the contact already replied, or asks the team leader / owner) and sends approved emails itself. Never ask the owner questions with this; decide yourself.',
+    `The only way anything leaves the company. Proposes an outgoing action; Jarvis routes it by the owner's policy (most things send automatically; money always waits for the owner) and sends emails${whatsappConnected() ? ' and WhatsApp messages' : ''} itself. Never ask the owner questions with this; decide yourself.${whatsappConnected() ? ' WhatsApp: first contacts go out as the approved template (name, company, your one-line hook); write the full pitch in body, it is used once they reply.' : ' WhatsApp is not connected: messages for WhatsApp go as kind "other" with the number in details.channel.'}`,
     {
-      kind: z.enum(KINDS).describe('email | proposal | post | call | payment | purchase | contract | deletion | other'),
+      kind: z.enum(KINDS).describe('email | proposal | whatsapp | post | call | payment | purchase | contract | deletion | other'),
       summary: z.string().describe('One line: what and to whom'),
       details: z
         .object({
@@ -91,7 +92,8 @@ export function jarvisTools(ctx) {
           to_name: z.string().optional(),
           company: z.string().optional(),
           website: z.string().optional(),
-          phone: z.string().optional(),
+          phone: z.string().optional().describe('Phone number in international format (required for whatsapp)'),
+          hook: z.string().optional().describe('For whatsapp first contact: one short personalised sentence used as the template variable'),
           subject: z.string().optional(),
           body: z.string().optional().describe('Full message text. The owner signature is added automatically.'),
           amount: z.number().optional().describe('Money involved, if any'),
@@ -133,8 +135,8 @@ export function jarvisTools(ctx) {
 
   const checkContact = tool(
     'check_contact',
-    'Checks whether an email address may be contacted and whether the person has replied to us before.',
-    { email: z.string() },
+    'Checks whether an email address or phone number may be contacted and whether the person has replied to us before.',
+    { email: z.string().describe('Email address or phone number') },
     async ({ email }) => text(JSON.stringify({ allowed: !isBlocked(orgId, email), has_replied: contactHasReplied(orgId, email) })),
   );
 
@@ -197,15 +199,80 @@ export function jarvisTools(ctx) {
     return text('Remembered.');
   });
 
-  const replies = tool('read_replies', 'Recent replies to emails Jarvis sent for this organisation.', { limit: z.number().int().min(1).max(50).optional() }, async ({ limit }) => {
+  const replies = tool('read_replies', 'Recent replies (email and WhatsApp) to messages Jarvis sent for this organisation.', { limit: z.number().int().min(1).max(50).optional() }, async ({ limit }) => {
     const rows = all(
       `SELECT r.from_email, r.subject, r.body, r.received_at, s.subject AS our_subject FROM replies r JOIN sent_emails s ON s.id = r.sent_email_id WHERE s.org_id IS ? ORDER BY r.received_at DESC LIMIT ?`,
       orgId,
       limit ?? 10,
     );
-    if (!rows.length) return text('No replies yet.');
-    return text(rows.map((r) => `FROM ${r.from_email} (${new Date(r.received_at).toISOString().slice(0, 10)}) re "${r.our_subject}":\n${r.body}`).join('\n\n---\n\n'));
+    const wa = recentWhatsapp(orgId, limit ?? 10);
+    if (!rows.length && !wa.length) return text('No replies yet.');
+    const emails = rows.map((r) => `EMAIL FROM ${r.from_email} (${new Date(r.received_at).toISOString().slice(0, 10)}) re "${r.our_subject}":\n${r.body}`);
+    const chats = wa.map((m) => `WHATSAPP FROM +${m.phone}${m.name ? ` (${m.name})` : ''} (${new Date(m.ts).toISOString().slice(0, 16).replace('T', ' ')}):\n${m.body}`);
+    return text([...chats, ...emails].join('\n\n---\n\n'));
   });
+
+  // The Operator may grow the organisation when that is what reaching the goal needs.
+  const canRestructure = ['operator', 'jarvis'].includes(agent.tier) && orgId;
+  const createDepartment = tool(
+    'create_department',
+    canRestructure ? 'Creates a new department with a head agent, teams, leaders and workers. Use when the goals need work no existing department owns.' : 'Not available for your role.',
+    {
+      name: z.string(),
+      description: z.string().optional(),
+      head: z.object({ name: z.string(), role: z.string(), instructions: z.string().optional() }),
+      teams: z
+        .array(
+          z.object({
+            name: z.string(),
+            description: z.string().optional(),
+            leader: z.object({ name: z.string(), role: z.string(), instructions: z.string().optional() }),
+            agents: z.array(z.object({ name: z.string(), role: z.string(), instructions: z.string().optional(), web: z.boolean().optional() })).optional(),
+          }),
+        )
+        .optional(),
+    },
+    async (d) => {
+      if (!canRestructure) return text('Refused: only Jarvis can change the structure.');
+      if (one('SELECT id FROM departments WHERE org_id = ? AND lower(name) = lower(?)', orgId, d.name)) return text(`A department named "${d.name}" already exists.`);
+      const count = one('SELECT COUNT(*) AS n FROM departments WHERE org_id = ?', orgId).n;
+      const colors = ['#ff8a3d', '#3fb5ff', '#b36bff', '#ff5a5a', '#ffd23f', '#39e58c', '#ff6fb1', '#29d3f5'];
+      const deptId = insert('INSERT INTO departments (org_id, name, description, color, position, created_at) VALUES (?, ?, ?, ?, ?, ?)', orgId, d.name.slice(0, 60), (d.description ?? '').slice(0, 400), colors[count % colors.length], count, now());
+      insert(`INSERT INTO agents (org_id, department_id, name, role, instructions, tier, model, web, created_at) VALUES (?, ?, ?, ?, ?, 'head', 'auto', 1, ?)`, orgId, deptId, d.head.name.slice(0, 40), d.head.role.slice(0, 80), (d.head.instructions ?? '').slice(0, 1500), now());
+      for (const [i, t] of (d.teams ?? []).entries()) {
+        const teamId = insert('INSERT INTO teams (department_id, name, description, position, created_at) VALUES (?, ?, ?, ?, ?)', deptId, t.name.slice(0, 60), (t.description ?? '').slice(0, 400), i, now());
+        insert(`INSERT INTO agents (org_id, department_id, team_id, name, role, instructions, tier, model, web, created_at) VALUES (?, ?, ?, ?, ?, ?, 'leader', 'auto', 1, ?)`, orgId, deptId, teamId, t.leader.name.slice(0, 40), t.leader.role.slice(0, 80), (t.leader.instructions ?? '').slice(0, 1500), now());
+        for (const a of t.agents ?? []) insert(`INSERT INTO agents (org_id, department_id, team_id, name, role, instructions, tier, model, web, created_at) VALUES (?, ?, ?, ?, ?, ?, 'worker', 'auto', ?, ?)`, orgId, deptId, teamId, a.name.slice(0, 40), a.role.slice(0, 80), (a.instructions ?? '').slice(0, 1500), a.web ? 1 : 0, now());
+      }
+      recordActivity({ scope, task, agent: agent.name, kind: 'structure', text: `Created department ${d.name} with ${(d.teams ?? []).length} team(s)` });
+      notify('org', { orgId });
+      return text(`Department "${d.name}" created (head ${d.head.name}, ${(d.teams ?? []).length} team(s)). You can delegate to department:${d.name} now.`);
+    },
+  );
+
+  const createTeam = tool(
+    'create_team',
+    canRestructure ? 'Adds a team (leader plus workers) to an existing department.' : 'Not available for your role.',
+    {
+      department: z.string(),
+      name: z.string(),
+      description: z.string().optional(),
+      leader: z.object({ name: z.string(), role: z.string(), instructions: z.string().optional() }),
+      agents: z.array(z.object({ name: z.string(), role: z.string(), instructions: z.string().optional(), web: z.boolean().optional() })).optional(),
+    },
+    async (t) => {
+      if (!canRestructure) return text('Refused: only Jarvis can change the structure.');
+      const dept = one('SELECT id FROM departments WHERE org_id = ? AND lower(name) = lower(?)', orgId, t.department);
+      if (!dept) return text(`No department named "${t.department}".`);
+      const n = one('SELECT COUNT(*) AS n FROM teams WHERE department_id = ?', dept.id).n;
+      const teamId = insert('INSERT INTO teams (department_id, name, description, position, created_at) VALUES (?, ?, ?, ?, ?)', dept.id, t.name.slice(0, 60), (t.description ?? '').slice(0, 400), n, now());
+      insert(`INSERT INTO agents (org_id, department_id, team_id, name, role, instructions, tier, model, web, created_at) VALUES (?, ?, ?, ?, ?, ?, 'leader', 'auto', 1, ?)`, orgId, dept.id, teamId, t.leader.name.slice(0, 40), t.leader.role.slice(0, 80), (t.leader.instructions ?? '').slice(0, 1500), now());
+      for (const a of t.agents ?? []) insert(`INSERT INTO agents (org_id, department_id, team_id, name, role, instructions, tier, model, web, created_at) VALUES (?, ?, ?, ?, ?, ?, 'worker', 'auto', ?, ?)`, orgId, dept.id, teamId, a.name.slice(0, 40), a.role.slice(0, 80), (a.instructions ?? '').slice(0, 1500), a.web ? 1 : 0, now());
+      recordActivity({ scope, task, agent: agent.name, kind: 'structure', text: `Created team ${t.name} in ${t.department}` });
+      notify('org', { orgId });
+      return text(`Team "${t.name}" created in ${t.department}. Delegate to team:${t.name}.`);
+    },
+  );
 
   const missions = tool('list_missions', 'Open and recent missions in this organisation.', {}, async () => {
     const rows = all(
@@ -215,5 +282,5 @@ export function jarvisTools(ctx) {
     return text(rows.map((r) => `#${r.id} [${r.status}] ${r.title}${r.agent ? ` (${r.agent})` : ''}${r.live_status ? ` — ${r.live_status}` : ''}`).join('\n') || 'None.');
   });
 
-  return createSdkMcpServer({ name: 'jarvis', version: '2.0.0', tools: [propose, addLeadTool, checkContact, delegate, progress, kpi, goal, remember, replies, missions] });
+  return createSdkMcpServer({ name: 'jarvis', version: '2.0.0', tools: [propose, addLeadTool, checkContact, delegate, progress, kpi, goal, remember, replies, missions, createDepartment, createTeam] });
 }

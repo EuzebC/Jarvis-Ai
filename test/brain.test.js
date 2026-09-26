@@ -5,22 +5,34 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.JARVIS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'jarvis-brain-'));
+process.env.JARVIS_COMPANIES_DIR = path.join(process.env.JARVIS_DATA_DIR, 'companies'); // never the real D:\JarvisCompanies
 const policy = await import('../service/brain/policy.js');
 const ws = await import('../service/brain/workspace.js');
-const { insert, one, now } = await import('../service/db.js');
+const { insert, one, now, setSetting } = await import('../service/db.js');
+const wa = await import('../service/connectors/whatsapp.js');
 const { proposeAction } = await import('../service/brain/proposals.js');
 const { appendLead, readLeads } = await import('../service/brain/tools.js');
 const { createMission, leaderFor, teamAsSubagents } = await import('../service/brain/missions.js');
 const { applyDraft } = await import('../service/structure.js');
 const { ensureOrgJarvis } = await import('../service/agents.js');
 
-test('policy: owner only for money, first contact to owner, replies continue automatically, questions declined', () => {
+test('policy: payments always to the owner; the approval level decides the rest; questions declined', () => {
+  // Default level "payments": only money waits for the owner.
   assert.equal(policy.routeAction({ kind: 'payment' }).route, 'owner');
-  assert.equal(policy.routeAction({ kind: 'deletion' }).route, 'owner');
-  assert.equal(policy.routeAction({ kind: 'email' }).route, 'owner');
-  assert.equal(policy.routeAction({ kind: 'email', leaderCanApprove: true }).route, 'leader');
-  assert.equal(policy.routeAction({ kind: 'email', contactHasReplied: true }).route, 'auto');
+  assert.equal(policy.routeAction({ kind: 'purchase' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'deletion' }).route, 'auto');
+  assert.equal(policy.routeAction({ kind: 'email' }).route, 'auto');
+  assert.equal(policy.routeAction({ kind: 'whatsapp' }).route, 'auto');
+  assert.equal(policy.routeAction({ kind: 'email', leaderCanApprove: true }).route, 'auto');
+  // Level "money": contracts and deletions too.
+  assert.equal(policy.routeAction({ kind: 'deletion', level: 'money' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'email', level: 'money' }).route, 'auto');
+  // Level "first_contact": the first message to a new contact as well.
+  assert.equal(policy.routeAction({ kind: 'email', level: 'first_contact' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'email', level: 'first_contact', leaderCanApprove: true }).route, 'leader');
+  assert.equal(policy.routeAction({ kind: 'email', level: 'first_contact', contactHasReplied: true }).route, 'auto');
   assert.equal(policy.routeAction({ kind: 'email', hasRecipient: false }).route, 'decline');
+  assert.match(policy.approvalSentence('payments'), /payments and purchases only/);
   assert.equal(policy.routeAction({ kind: 'other', summary: 'Owner: confirm the do-not-contact list is complete' }).route, 'decline');
   assert.equal(policy.routeAction({ kind: 'other', summary: 'Which approach should we take?' }).route, 'decline');
   assert.equal(policy.routeAction({ kind: 'other', summary: 'Submit the enquiry form on their website with our pitch' }).route, 'owner');
@@ -41,6 +53,28 @@ test('sandbox: paths and shell commands are confined to the workspace', () => {
   assert.equal(ws.commandAllowed(root, 'shutdown /s /t 0').ok, false);
   assert.equal(ws.commandAllowed(root, 'rm -rf /').ok, false);
   assert.equal(ws.commandAllowed(root, 'cat ../../other/file').ok, false);
+  // Folders with spaces work when the path is quoted; unquoted outside paths are still caught.
+  const spaced = path.join(os.tmpdir(), 'Jarvis Companies', 'Lumora Digital');
+  assert.equal(ws.commandAllowed(spaced, `type "${path.join(spaced, 'crm', 'leads.csv')}"`).ok, true);
+  assert.equal(ws.commandAllowed(spaced, `Get-Content '${path.join(spaced, 'outputs', 'report.md')}'`).ok, true);
+  assert.equal(ws.commandAllowed(spaced, `type "${path.join(os.tmpdir(), 'Jarvis Companies', 'Other Org', 'a.txt')}"`).ok, false);
+  assert.equal(ws.commandAllowed(spaced, 'type C:\\Users\\HP\\secret.txt').ok, false);
+});
+
+test('organisation folders: suggested on the PC, moved with their files, adopted at start', () => {
+  const suggested = ws.suggestOrgFolder('Acme / Digital: Agency');
+  assert.ok(path.isAbsolute(suggested));
+  assert.equal(path.dirname(suggested), process.env.JARVIS_COMPANIES_DIR);
+  assert.equal(path.basename(suggested), 'Acme-Digital-Agency');
+  const oid = insert('INSERT INTO orgs (name, created_at, updated_at) VALUES (?, ?, ?)', 'Folder Co', now(), now());
+  const before = ws.ensureWorkspace({ orgId: oid });
+  fs.writeFileSync(path.join(before, 'outputs', 'hello.md'), '# hi');
+  const target = path.join(process.env.JARVIS_DATA_DIR, 'visible', 'Folder-Co');
+  assert.equal(ws.moveOrgWorkspace(oid, target), target);
+  assert.equal(ws.orgDir(oid), target);
+  assert.equal(fs.readFileSync(path.join(target, 'outputs', 'hello.md'), 'utf8'), '# hi');
+  assert.throws(() => ws.moveOrgWorkspace(oid, 'relative/path'));
+  assert.equal(ws.adoptFolders().some(([name]) => name === 'Folder Co'), false); // already has a folder
 });
 
 // A small organisation to route proposals and missions through.
@@ -75,13 +109,22 @@ test('workspace: CLAUDE.md carries the mind, structure, policy and tool guide', 
   assert.ok(fs.existsSync(path.join(dir, 'MEMORY.md')));
 });
 
-test('proposals: refuse missing recipients and placeholders, route first contact to the owner, auto-send after a reply', () => {
+test('proposals: refuse missing recipients and placeholders, first contact follows the approval level, auto-send after a reply', () => {
   const task = { id: null, team_id: team.id, org_id: orgId };
   assert.match(proposeAction({ scope, task, kind: 'email', summary: 'x', details: {} }).message, /real recipient/);
   assert.match(proposeAction({ scope, task, kind: 'email', summary: 'x', details: { to: 'a@b.rw', body: 'Dear [Client]' } }).message, /placeholders/);
+  // Default level: first contacts go out by themselves (they wait in the Outbox until Gmail is connected).
+  const auto = proposeAction({ scope, task, kind: 'email', summary: 'Intro to Nova', details: { to: 'ceo@nova.rw', subject: 'Hi', body: 'Real text' } });
+  assert.equal(auto.route, 'auto');
+  assert.equal(one('SELECT status, decided_by FROM approvals WHERE id = ?', auto.approvalId).decided_by, 'policy');
+  // Stricter level: the owner sees the first message.
+  setSetting('approval_level', 'first_contact');
   const first = proposeAction({ scope, task, kind: 'email', summary: 'Intro to Smile', details: { to: 'dr@smile.rw', subject: 'Hi', body: 'Real text' } });
   assert.equal(first.route, 'owner');
   assert.equal(one('SELECT status FROM approvals WHERE id = ?', first.approvalId).status, 'pending');
+  // WhatsApp needs a phone number and the connector.
+  assert.match(proposeAction({ scope, task, kind: 'whatsapp', summary: 'x', details: { body: 'Hello' } }).message, /phone number/);
+  assert.match(proposeAction({ scope, task, kind: 'whatsapp', summary: 'x', details: { phone: '+250 788 123 456', body: 'Hello' } }).message, /not connected/);
   const sent = insert(`INSERT INTO sent_emails (org_id, message_id, to_email, subject, sent_at) VALUES (?, 'm1', 'dr@smile.rw', 'Hi', ?)`, orgId, now());
   insert(`INSERT INTO replies (sent_email_id, from_email, subject, body, received_at, uid) VALUES (?, 'dr@smile.rw', 'Re: Hi', 'Yes please', ?, 'u1')`, sent, now());
   const followUp = proposeAction({ scope, task, kind: 'email', summary: 'Follow-up', details: { to: 'dr@smile.rw', subject: 'Re: Hi', body: 'Great, Thursday?' } });
@@ -89,6 +132,26 @@ test('proposals: refuse missing recipients and placeholders, route first contact
   assert.equal(one('SELECT status, decided_by FROM approvals WHERE id = ?', followUp.approvalId).decided_by, 'policy');
   assert.equal(proposeAction({ scope, task, kind: 'other', summary: 'Owner: confirm the plan?', details: {} }).route, 'decline');
   assert.equal(proposeAction({ scope, task, kind: 'payment', summary: 'Renew domain', details: { amount: 12 } }).route, 'owner');
+  setSetting('approval_level', 'payments');
+});
+
+test('whatsapp: numbers are normalised, webhook payloads are parsed, inbound messages are matched to what we sent', () => {
+  assert.equal(wa.normalisePhone('+250 788 123 456'), '250788123456');
+  assert.equal(wa.normalisePhone('12'), null);
+  const payload = {
+    entry: [{ changes: [{ value: { contacts: [{ wa_id: '250788123456', profile: { name: 'Dr Uwase' } }], messages: [{ id: 'wamid.1', from: '250788123456', timestamp: '1760000000', type: 'text', text: { body: 'Oui, intéressé' } }, { id: 'wamid.2', from: '250788123456', timestamp: '1760000001', type: 'image' }] } }] }],
+  };
+  const msgs = wa.parseInbound(payload);
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].name, 'Dr Uwase');
+  wa.recordOutbound({ orgId, teamId: team.id, approvalId: null, phone: '250788123456', body: 'Bonjour', waId: 'wamid.out', mode: 'template' });
+  const rec = wa.recordInbound(msgs[0]);
+  assert.equal(rec.last.body, 'Bonjour');
+  assert.equal(rec.row.org_id, orgId);
+  assert.equal(wa.recordInbound(msgs[0]), null); // seen once
+  assert.equal(wa.hasWrittenToUs(orgId, '250788123456'), true);
+  assert.equal(wa.inServiceWindow('250788123456'), false); // the sample timestamp is old
+  assert.equal(policy.routeAction({ kind: 'whatsapp', contactHasReplied: true, level: 'first_contact' }).route, 'auto');
 });
 
 test('CRM file: leads are appended once, de-duplicated by email or website', () => {

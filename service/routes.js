@@ -18,7 +18,10 @@ import { config } from './config.js';
 import { clampPriority } from './protocol.js';
 import { testHubspot } from './connectors/hubspot.js';
 import { testGmail } from './connectors/gmail.js';
-import { deliverQueued, dailyLimit, sentToday } from './outbox.js';
+import { testWhatsapp, verifyToken, signatureValid, whatsappConnected, whatsappDailyLimit, whatsappSentToday } from './connectors/whatsapp.js';
+import { deliverQueued, dailyLimit, sentToday, receiveWhatsapp } from './outbox.js';
+import { orgDir, suggestOrgFolder, moveOrgWorkspace, ensureWorkspace } from './brain/workspace.js';
+import { LEVELS, approvalSentence } from './brain/policy.js';
 import { defaultVault, initVault, syncMinds, writeBriefing } from './connectors/obsidian.js';
 import { listBlocked, blockContact, unblock } from './optout.js';
 
@@ -168,15 +171,55 @@ route('POST', '/api/orgs', async (req, res) => {
     t,
   );
   ensureOrgJarvis(orgId);
-  log('info', `Organisation created: ${b.name}`, orgId);
+  // Every organisation gets its own folder on this PC, where Jarvis has full rights.
+  let folder = null;
+  try {
+    const wanted = typeof b.folder === 'string' && path.isAbsolute(b.folder.trim()) ? b.folder.trim() : suggestOrgFolder(b.name);
+    folder = moveOrgWorkspace(orgId, wanted);
+    ensureWorkspace({ orgId });
+  } catch (err) {
+    log('warn', `Could not create the folder for ${b.name}: ${err.message}`, orgId);
+  }
+  log('info', `Organisation created: ${b.name}${folder ? ` (folder ${folder})` : ''}`, orgId);
   notify('orgs');
-  send(res, 201, { id: orgId });
+  send(res, 201, { id: orgId, folder });
+});
+
+route('GET', '/api/orgs/folder-suggestion', (req, res, ctx) => send(res, 200, { folder: suggestOrgFolder(ctx.query.get('name') || '') }));
+
+// Move an organisation to another folder on this PC (its files are copied over).
+route('PUT', '/api/orgs/:id/workspace', async (req, res, ctx) => {
+  const org = mustExist('orgs', id(ctx.params.id), 'Organisation');
+  const b = await readJson(req);
+  const target = text(b.path, 400, 'Folder').trim();
+  if (!path.isAbsolute(target)) throw new HttpError(400, 'Use a full folder path, for example D:\\JarvisCompanies\\Acme');
+  const lower = path.resolve(target).toLowerCase();
+  const src = path.resolve(import.meta.dirname, '..').toLowerCase();
+  if (lower === src || lower.startsWith(src + path.sep) || lower.startsWith(path.resolve(config.dataDir).toLowerCase() + path.sep + 'db')) throw new HttpError(400, 'Choose a folder outside the Jarvis program folder');
+  try {
+    const folder = moveOrgWorkspace(org.id, target);
+    ensureWorkspace({ orgId: org.id });
+    log('info', `${org.name} now works in ${folder}`, org.id);
+    notify('orgs');
+    send(res, 200, { ok: true, folder });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+});
+
+// Opens the organisation's folder in Explorer.
+route('POST', '/api/orgs/:id/workspace/open', (req, res, ctx) => {
+  const org = mustExist('orgs', id(ctx.params.id), 'Organisation');
+  const dir = ensureWorkspace({ orgId: org.id });
+  spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  send(res, 200, { ok: true, folder: dir });
 });
 
 route('GET', '/api/orgs/:id', (req, res, ctx) => {
   const org = mustExist('orgs', id(ctx.params.id), 'Organisation');
   send(res, 200, {
     ...org,
+    folder: orgDir(org.id),
     departments: departmentCards(org.id),
     goals: all(`SELECT * FROM goals WHERE scope = 'org' AND scope_id = ? ORDER BY period`, org.id),
     feed: all('SELECT * FROM events WHERE org_id = ? ORDER BY id DESC LIMIT 12', org.id),
@@ -690,6 +733,8 @@ route('GET', '/api/settings', (req, res) => {
     voice_wake: getSetting('voice_wake', '1') === '1',
     voice_speak: getSetting('voice_speak', '1') === '1',
     autonomy: getSetting('autonomy', '1') === '1',
+    approval_level: getSetting('approval_level', 'payments'),
+    approval_sentence: approvalSentence(getSetting('approval_level', 'payments')),
     ownerProfile: getSetting('owner_profile', ''),
     apiKeySet: Boolean(getSetting('anthropic_api_key')),
     apiCap: apiCap(),
@@ -704,6 +749,10 @@ route('PUT', '/api/settings', async (req, res) => {
   for (const k of UI_KEYS) {
     if (typeof b[k] === 'string') setSetting(k, b[k].slice(0, 40));
     if (typeof b[k] === 'boolean') setSetting(k, b[k] ? '1' : '0');
+  }
+  if (typeof b.approval_level === 'string' && LEVELS.includes(b.approval_level)) {
+    setSetting('approval_level', b.approval_level);
+    log('info', approvalSentence(b.approval_level));
   }
   if (typeof b.ownerProfile === 'string') setSetting('owner_profile', b.ownerProfile.slice(0, 20_000));
   if (typeof b.anthropicApiKey === 'string') setSetting('anthropic_api_key', b.anthropicApiKey.trim());
@@ -803,10 +852,100 @@ route('GET', '/api/connectors', (req, res) => {
       readReplies: getSetting('gmail_read_replies', '1') === '1',
       queued: one(`SELECT COUNT(*) AS n FROM approvals WHERE delivery = 'queued'`).n,
     },
+    whatsapp: {
+      connected: whatsappConnected(),
+      number: getSetting('whatsapp_number', ''),
+      name: getSetting('whatsapp_name', ''),
+      phoneId: getSetting('whatsapp_phone_id', ''),
+      template: getSetting('whatsapp_template', ''),
+      templateLang: getSetting('whatsapp_template_lang', 'en'),
+      templateParams: Number(getSetting('whatsapp_template_params', '2')),
+      dailyLimit: whatsappDailyLimit(),
+      sentToday: whatsappSentToday(),
+      appSecretSet: Boolean(getSetting('whatsapp_app_secret')),
+      publicUrl: getSetting('public_url', ''),
+      verifyToken: verifyToken(),
+      webhookPath: '/api/webhooks/whatsapp',
+      inbound: one(`SELECT COUNT(*) AS n FROM wa_messages WHERE direction = 'in'`).n,
+      lastInbound: one(`SELECT MAX(ts) AS t FROM wa_messages WHERE direction = 'in'`).t,
+    },
     signature: getSetting('email_signature', ''),
     footer: getSetting('email_footer', "If you'd rather not hear from me, just reply and let me know."),
   });
 });
+
+route('PUT', '/api/connectors/whatsapp', async (req, res) => {
+  const b = await readJson(req);
+  const phoneId = text(b.phoneId, 40, 'Phone number ID').replace(/\D/g, '');
+  const token = text(b.token, 600, 'Access token');
+  try {
+    const r = await testWhatsapp(phoneId, token);
+    setSetting('whatsapp_phone_id', phoneId);
+    setSetting('whatsapp_token', token);
+    setSetting('whatsapp_number', r.number);
+    setSetting('whatsapp_name', r.name);
+    if (typeof b.appSecret === 'string' && b.appSecret.trim()) setSetting('whatsapp_app_secret', b.appSecret.trim().slice(0, 200));
+    log('info', `WhatsApp connected (${r.number})`);
+    notify('settings');
+    deliverQueued().catch(() => {});
+    send(res, 200, { ok: true, message: r.message });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+});
+
+route('PUT', '/api/connectors/whatsapp/options', async (req, res) => {
+  const b = await readJson(req);
+  if (typeof b.template === 'string') setSetting('whatsapp_template', b.template.trim().slice(0, 120));
+  if (typeof b.templateLang === 'string' && /^[a-z]{2}(_[A-Z]{2})?$/.test(b.templateLang.trim())) setSetting('whatsapp_template_lang', b.templateLang.trim());
+  const n = Number(b.templateParams);
+  if (Number.isInteger(n) && n >= 0 && n <= 3) setSetting('whatsapp_template_params', n);
+  const limit = Number(b.dailyLimit);
+  if (Number.isFinite(limit) && limit >= 1) setSetting('whatsapp_daily_limit', Math.min(1000, Math.round(limit)));
+  if (typeof b.publicUrl === 'string') setSetting('public_url', b.publicUrl.trim().replace(/\/+$/, '').slice(0, 300));
+  if (typeof b.appSecret === 'string' && b.appSecret.trim()) setSetting('whatsapp_app_secret', b.appSecret.trim().slice(0, 200));
+  notify('settings');
+  send(res, 200, { ok: true });
+});
+
+route('DELETE', '/api/connectors/whatsapp', (req, res) => {
+  run(`DELETE FROM settings WHERE key IN ('whatsapp_phone_id', 'whatsapp_token', 'whatsapp_number', 'whatsapp_name')`);
+  log('info', 'WhatsApp disconnected');
+  notify('settings');
+  send(res, 200, { ok: true });
+});
+
+// Meta calls these two without signing in: the GET proves we own the endpoint, the POST delivers messages.
+route(
+  'GET',
+  '/api/webhooks/whatsapp',
+  (req, res, ctx) => {
+    const q = ctx.query;
+    if (q.get('hub.mode') === 'subscribe' && q.get('hub.verify_token') === verifyToken()) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' }).end(q.get('hub.challenge') ?? '');
+      return;
+    }
+    send(res, 403, { error: 'Verify token mismatch' });
+  },
+  { open: true },
+);
+route(
+  'POST',
+  '/api/webhooks/whatsapp',
+  async (req, res) => {
+    const raw = await readBody(req, 2_000_000);
+    if (!signatureValid(raw, req.headers['x-hub-signature-256'])) return send(res, 401, { error: 'Bad signature' });
+    let payload = {};
+    try {
+      payload = JSON.parse(raw.toString('utf8'));
+    } catch {
+      return send(res, 400, { error: 'Bad JSON' });
+    }
+    send(res, 200, { ok: true }); // answer Meta at once; processing continues
+    receiveWhatsapp(payload).catch((err) => log('warn', `WhatsApp webhook: ${err.message}`));
+  },
+  { open: true, webhook: true },
+);
 
 route('PUT', '/api/connectors/hubspot', async (req, res) => {
   const { token } = await readJson(req);

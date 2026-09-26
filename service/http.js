@@ -7,10 +7,10 @@ export class HttpError extends Error {
 }
 
 export const routes = [];
-export function route(method, pattern, handler, { open = false } = {}) {
+export function route(method, pattern, handler, { open = false, webhook = false } = {}) {
   const keys = [];
   const regex = new RegExp(`^${pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), '([^/]+)'))}$`);
-  routes.push({ method, regex, keys, handler, open });
+  routes.push({ method, regex, keys, handler, open, webhook });
 }
 
 export async function readBody(req, limit = 1_000_000) {

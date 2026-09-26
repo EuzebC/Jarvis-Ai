@@ -167,7 +167,7 @@ export function OrgHome({ ctx }) {
           {o.plan ? (
             <div className="small" style={{ lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{o.plan.text}</div>
           ) : (
-            <span className="faint small">{o.autonomy ? 'Jarvis plans the day every morning after 7:00, or press “Run Jarvis now”.' : 'Autonomy is off (Settings).'}</span>
+            <span className="faint small">{o.autonomy ? 'Jarvis plans every morning after 7:00, starts a new cycle whenever the teams are free, and wakes when replies arrive. Or press “Run Jarvis now”.' : 'Autonomy is off (Settings).'}</span>
           )}
         </div>
         <div className="panel col" style={{ gap: 4 }}>

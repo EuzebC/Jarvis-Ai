@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api, useData } from '../api.js';
 import { Pill, toast, ago } from '../components/ui.jsx';
 
-const KIND_LABEL = { email: 'Email', proposal: 'Proposal', post: 'Post', call: 'Call', payment: 'Payment · always you', contract: 'Contract', purchase: 'Purchase', other: 'Action' };
+const KIND_LABEL = { email: 'Email', proposal: 'Proposal', whatsapp: 'WhatsApp', post: 'Post', call: 'Call', payment: 'Payment · always you', contract: 'Contract', purchase: 'Purchase · always you', deletion: 'Deletion', other: 'For you to do' };
 
 const textOf = (a) => {
   const d = a.payload || {};
@@ -129,7 +129,7 @@ export default function Approvals({ ctx }) {
         {list.data && !list.data.length && <div className="empty panel">{tab === 'pending' ? 'All clear. Nothing is waiting for you.' : 'Nothing here yet.'}</div>}
       </div>
       {tab === 'approved' && (
-        <p className="small faint">Approved items are ready to send. Automatic sending (email, CRM, calendar) arrives with the connectors; until then, copy and send them yourself.</p>
+        <p className="small faint">Approved emails and WhatsApp messages are sent by the connectors (Settings). Items marked “For you to do” have no connector yet, so you carry them out.</p>
       )}
     </div>
   );

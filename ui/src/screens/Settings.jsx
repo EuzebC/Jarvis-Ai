@@ -8,6 +8,12 @@ import Connectors from './Connectors.jsx';
 
 const desktop = window.jarvisDesktop;
 
+const LEVELS = [
+  ['payments', 'Payments only', 'Jarvis sends first contacts, proposals and posts itself, and handles contracts and deletions on its own judgement. Only money waits for you.'],
+  ['money', 'Money, contracts and deletions', 'Every message is sent automatically; contracts and deleting data wait for you.'],
+  ['first_contact', 'Money, contracts, deletions and first contacts', 'The first message to a new contact waits for you (or the team leader when that switch is on).'],
+];
+
 export default function Settings({ ctx, reload }) {
   const s = ctx.settings;
   const login = useData('/api/engines/login');
@@ -146,9 +152,21 @@ export default function Settings({ ctx, reload }) {
         <div className="row between">
           <div>
             <div>Jarvis runs the organisations itself</div>
-            <div className="small muted">Every morning after 7:00 it plans the day and creates missions; it checks in at mid-day and reviews in the evening. You only approve money, contracts, deletions and the first message to a new contact.</div>
+            <div className="small muted">Every morning after 7:00 it plans the day and creates missions, starts a new cycle every two hours while the teams are free, reviews in the evening, and wakes up whenever someone replies or a mission is delivered. It creates departments and teams when the goals need them.</div>
           </div>
           <Switch checked={s.autonomy !== false} label="Autonomy" onChange={(v) => save({ autonomy: v }, v ? 'Jarvis will run the organisations itself' : 'Autonomy off: Jarvis only does what you assign')} />
+        </div>
+        <div className="col" style={{ gap: 8, borderTop: '1px solid var(--line-soft)', paddingTop: 12 }}>
+          <div>What waits for your approval</div>
+          {LEVELS.map(([key, title, note]) => (
+            <label key={key} className="row" style={{ alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+              <input type="radio" name="approval_level" checked={(s.approval_level ?? 'payments') === key} onChange={() => save({ approval_level: key }, title)} style={{ marginTop: 4 }} />
+              <span>
+                <b>{title}</b> <span className="muted small">{note}</span>
+              </span>
+            </label>
+          ))}
+          <div className="small faint">Payments and purchases always wait for you, whatever the level.</div>
         </div>
       </section>
 

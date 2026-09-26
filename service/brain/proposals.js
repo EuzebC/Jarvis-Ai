@@ -1,16 +1,18 @@
 // Policy-aware creation of outgoing actions. Agents never send anything themselves: every action goes
 // through here, is routed by the policy (auto-send, team leader, or owner), and approved emails are
 // handed to the Outbox, which sends them from Gmail and logs them in HubSpot.
-import { one, insert, run, now } from '../db.js';
+import { one, insert, run, now, getSetting } from '../db.js';
 import { log, notify } from '../events.js';
 import { routeApproved } from '../outbox.js';
 import { isBlocked } from '../optout.js';
 import { routeAction, OUTGOING, hasPlaceholders } from './policy.js';
+import { normalisePhone, hasWrittenToUs, whatsappConnected } from '../connectors/whatsapp.js';
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 
 export function contactHasReplied(orgId, email) {
   if (!email) return false;
+  if (!String(email).includes('@')) return hasWrittenToUs(orgId, normalisePhone(email));
   return Boolean(
     one(
       `SELECT r.id FROM replies r JOIN sent_emails s ON s.id = r.sent_email_id WHERE s.org_id IS ? AND lower(s.to_email) = lower(?) LIMIT 1`,
@@ -26,9 +28,12 @@ export function contactHasReplied(orgId, email) {
 export function proposeAction({ scope, task, kind, summary, details = {} }) {
   const orgId = scope.orgId ?? null;
   const to = String(details.to ?? '');
-  const email = to.match(EMAIL_RE)?.[0]?.toLowerCase() ?? null;
   const needsRecipient = OUTGOING.has(kind) && kind !== 'post';
+  // WhatsApp messages are addressed to a phone number; everything else to an email address.
+  const email = kind === 'whatsapp' ? normalisePhone(details.phone || to) : (to.match(EMAIL_RE)?.[0]?.toLowerCase() ?? null);
 
+  if (kind === 'whatsapp' && !email) return { ok: false, message: 'Refused: a WhatsApp message needs the phone number you actually found (international format).' };
+  if (kind === 'whatsapp' && !whatsappConnected()) return { ok: false, message: 'Refused: WhatsApp is not connected yet. Propose it as kind "other" with the number in details.channel so the owner can send it from their phone, or use email.' };
   if (needsRecipient && !email && kind !== 'call') {
     return { ok: false, message: 'Refused: an email or proposal needs a real recipient address that you actually found. If there is none, add the lead to the CRM with the contact channel you did find and move on.' };
   }
@@ -44,6 +49,7 @@ export function proposeAction({ scope, task, kind, summary, details = {} }) {
     contactHasReplied: contactHasReplied(orgId, email),
     leaderCanApprove: Boolean(team?.leader_can_approve),
     hasRecipient: !needsRecipient || Boolean(email) || kind === 'call',
+    level: getSetting('approval_level', 'payments'),
   });
   if (decision.route === 'decline') return { ok: false, route: 'decline', message: decision.reason };
 
@@ -56,7 +62,7 @@ export function proposeAction({ scope, task, kind, summary, details = {} }) {
     task?.team_id ?? null,
     kind,
     String(summary).slice(0, 500),
-    JSON.stringify(details),
+    JSON.stringify(kind === 'whatsapp' ? { ...details, to: email } : details),
     auto ? 'approved' : 'pending',
     auto ? 'policy' : null,
     auto ? decision.reason : null,

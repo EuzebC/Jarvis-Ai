@@ -6,13 +6,20 @@
 // sent automatically. Everything else is the agents' job to decide; asking the owner is refused.
 
 export const OWNER_ONLY = new Set(['payment', 'purchase', 'contract', 'deletion']);
-export const OUTGOING = new Set(['email', 'proposal', 'post', 'call']);
+export const OUTGOING = new Set(['email', 'proposal', 'post', 'call', 'whatsapp']);
 export const KINDS = [...OWNER_ONLY, ...OUTGOING, 'other'];
 
 export const DECLINE_TEXT =
-  'Jarvis does not forward questions to the owner. The owner only decides on money, contracts, deleting data, ' +
-  'and the first message to a new contact. Decide this yourself using the organisation profile, the goals and your ' +
+  'Jarvis does not forward questions to the owner. The owner only decides on money (and, depending on the settings, contracts, deletions ' +
+  'and first contacts). Decide this yourself using the organisation profile, the goals and your ' +
   'own judgement, write your assumption in your journal, and proceed. If a piece of information is missing, find it or make the safest reasonable assumption.';
+
+// One sentence for prompts and the HUD describing what the owner currently approves.
+export function approvalSentence(level = 'payments') {
+  if (level === 'first_contact') return 'The owner approves money, contracts, deleting data and the first message to a new contact; everything else is automatic.';
+  if (level === 'money') return 'The owner approves money, contracts and deleting data; every message is sent automatically.';
+  return 'The owner approves payments and purchases only; everything else, including first contacts, is sent or done automatically.';
+}
 
 /**
  * Routes a proposed action.
@@ -23,8 +30,18 @@ export const DECLINE_TEXT =
  * @param {boolean} [p.hasRecipient]     the action names a real recipient
  * @returns {{ route: 'owner' | 'leader' | 'auto' | 'decline', reason: string }}
  */
-export function routeAction({ kind, summary = '', contactHasReplied = false, leaderCanApprove = false, hasRecipient = true }) {
-  if (OWNER_ONLY.has(kind)) return { route: 'owner', reason: 'Money, contracts and deletions are always the owner’s call.' };
+// Approval levels, chosen by the owner in Settings:
+//   payments      only money comes to the owner; everything else is sent or done automatically (the owner's choice)
+//   money         money, contracts and deletions come to the owner
+//   first_contact money, contracts, deletions and the first message to a new contact
+export const LEVELS = ['payments', 'money', 'first_contact'];
+
+export function routeAction({ kind, summary = '', contactHasReplied = false, leaderCanApprove = false, hasRecipient = true, level = 'payments' }) {
+  if (kind === 'payment' || kind === 'purchase') return { route: 'owner', reason: 'Money is always the owner’s call.' };
+  if (OWNER_ONLY.has(kind)) {
+    if (level === 'payments') return { route: 'auto', reason: 'The owner lets Jarvis handle contracts and deletions itself.' };
+    return { route: 'owner', reason: 'Contracts and deletions come to the owner.' };
+  }
   // "other" is for real actions Jarvis cannot carry out itself (a form to submit, a call to place), never for questions.
   if (kind === 'other') {
     if (looksLikeHandback(summary) || /\?\s*$/.test(summary)) return { route: 'decline', reason: DECLINE_TEXT };
@@ -33,6 +50,7 @@ export function routeAction({ kind, summary = '', contactHasReplied = false, lea
   if (OUTGOING.has(kind)) {
     if (!hasRecipient) return { route: 'decline', reason: 'An outgoing message needs a real recipient you actually found. Do not guess addresses.' };
     if (contactHasReplied) return { route: 'auto', reason: 'The contact has already replied, so the conversation continues without approval.' };
+    if (level !== 'first_contact') return { route: 'auto', reason: 'The owner lets Jarvis send first contacts itself.' };
     if (leaderCanApprove) return { route: 'leader', reason: 'First contact: the team leader reviews it.' };
     return { route: 'owner', reason: 'First message to a new contact: the owner approves it.' };
   }

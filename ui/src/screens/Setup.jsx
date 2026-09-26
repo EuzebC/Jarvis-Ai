@@ -6,12 +6,15 @@ import { go } from '../App.jsx';
 
 export function NewOrg({ ctx, onCreated }) {
   const [busy, setBusy] = useState(false);
+  const [name, setName] = useState('');
+  const suggestion = useData(`/api/orgs/folder-suggestion?name=${encodeURIComponent(name || 'New Organisation')}`, [name]);
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
     const f = new FormData(e.target);
     try {
-      const { id } = await api('POST', '/api/orgs', { name: f.get('name'), description: f.get('description'), profile: f.get('profile') });
+      const { id, folder } = await api('POST', '/api/orgs', { name: f.get('name'), description: f.get('description'), profile: f.get('profile'), folder: f.get('folder') });
+      if (folder) toast(`Folder created: ${folder}`);
       onCreated(id);
       if (f.get('mode') === 'propose') {
         await api('POST', `/api/orgs/${id}/propose`);
@@ -31,7 +34,12 @@ export function NewOrg({ ctx, onCreated }) {
         </div>
         <label className="field">
           <span>Name</span>
-          <input className="input" name="name" required autoFocus maxLength={80} placeholder="e.g. WeCLearn" />
+          <input className="input" name="name" required autoFocus maxLength={80} placeholder="e.g. WeCLearn" value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Folder on this PC (Jarvis has full rights inside it)</span>
+          <input className="input" name="folder" maxLength={400} placeholder={suggestion.data?.folder ?? 'D:\\JarvisCompanies\\<name>'} />
+          <span className="small faint" style={{ textTransform: 'none', letterSpacing: 0 }}>Leave empty to use the suggested folder. Documents, programs, the CRM and journals all live there.</span>
         </label>
         <label className="field">
           <span>One-line description</span>

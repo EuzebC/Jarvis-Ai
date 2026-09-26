@@ -61,8 +61,21 @@ function Room({ d }) {
 export default function OrgMap({ ctx }) {
   const org = useData(ctx.orgId ? `/api/orgs/${ctx.orgId}` : null, [ctx.orgId]);
   const [adding, setAdding] = useState(false);
+  const [folderEdit, setFolderEdit] = useState(null);
   const o = org.data;
   if (!o) return null;
+  const openFolder = () => api('POST', `/api/orgs/${o.id}/workspace/open`).catch((e) => toast(e.message, true));
+  const saveFolder = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('PUT', `/api/orgs/${o.id}/workspace`, { path: folderEdit });
+      toast(`Now working in ${r.folder}`);
+      setFolderEdit(null);
+      org.reload();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
   const cols = o.departments.length > 6 ? 4 : 3;
 
   const addDept = async (e) => {
@@ -136,6 +149,33 @@ export default function OrgMap({ ctx }) {
             </div>
           ))}
           {!o.goals.length && <span className="faint small">No company goals yet.</span>}
+        </div>
+        <div className="col" style={{ gap: 6 }}>
+          <span className="label">▶ Folder on this PC</span>
+          <div className="small muted">Everything the teams make is saved here. Jarvis has full rights inside this folder and nowhere else.</div>
+          {folderEdit === null ? (
+            <>
+              <div className="mono small" style={{ wordBreak: 'break-all' }}>{o.folder}</div>
+              <div className="row">
+                <button type="button" className="btn small" onClick={openFolder}>
+                  Open folder
+                </button>
+                <button type="button" className="btn small" onClick={() => setFolderEdit(o.folder)}>
+                  Change…
+                </button>
+              </div>
+            </>
+          ) : (
+            <form className="col" style={{ gap: 6 }} onSubmit={saveFolder}>
+              <input className="input" value={folderEdit} onChange={(e) => setFolderEdit(e.target.value)} aria-label="Folder path" />
+              <div className="row">
+                <button className="btn small primary">Move here</button>
+                <button type="button" className="btn small" onClick={() => setFolderEdit(null)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
         </div>
         <div className="col" style={{ gap: 6 }}>
           <span className="label">▶ Department health</span>
