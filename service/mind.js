@@ -3,15 +3,12 @@ import path from 'node:path';
 import { config } from './config.js';
 import { one, all, run, insert, now, getSetting } from './db.js';
 import { notify } from './events.js';
+import { ensureWorkspace } from './brain/workspace.js';
 
 // Every organisation, and every personal project, has its own workspace folder.
 // It is the only place its agents can read or write files.
-export function workDir({ orgId, projectId }) {
-  const name = orgId ? `org-${orgId}` : projectId ? `personal-${projectId}` : 'personal';
-  const dir = path.join(config.dataDir, 'work', name);
-  fs.mkdirSync(path.join(dir, 'outputs'), { recursive: true });
-  fs.mkdirSync(path.join(dir, 'knowledge'), { recursive: true });
-  return dir;
+export function workDir(scope) {
+  return ensureWorkspace({ orgId: scope.orgId ?? null });
 }
 
 // ---------- memories ----------
@@ -134,6 +131,17 @@ export function mindText({ orgId = null, projectId = null }) {
     orgId,
     projectId,
   ).map((f) => `- ./${f.rel_path}`);
+  const root = workDir({ orgId, projectId });
+  const notes = [];
+  const walk = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(path.join(dir, e.name));
+      else if (notes.length < 200) notes.push(`- ./${path.relative(root, path.join(dir, e.name)).split(path.sep).join('/')}`);
+    }
+  };
+  walk(path.join(root, 'knowledge', 'obsidian'));
   if (knowledge.length) parts.push(`KNOWLEDGE FILES (read when relevant):\n${knowledge.join('\n')}`);
+  if (notes.length) parts.push(`THE OWNER'S OBSIDIAN NOTES (read-only copies; read the relevant ones before you start):\n${notes.join('\n')}`);
   return parts.join('\n\n');
 }

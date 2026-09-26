@@ -148,6 +148,9 @@ export function OrgHome({ ctx }) {
             <button type="button" className="btn small" onClick={() => setGiving(true)}>
               New goal / task
             </button>
+            <button type="button" className="btn small" onClick={() => api('POST', `/api/orgs/${ctx.orgId}/operator/run`, { mode: 'midday', reason: 'requested by the owner' }).then(() => toast('Jarvis is reviewing the organisation'))}>
+              Run Jarvis now
+            </button>
             <button type="button" className="btn small" onClick={() => go('/map')}>
               Organisation map
             </button>
@@ -160,14 +163,24 @@ export function OrgHome({ ctx }) {
           </div>
         </div>
         <div className="panel col" style={{ gap: 6 }}>
-          <span className="label">▶ Last output</span>
-          {o.lastOutput ? (
-            <a href={`#/task/${o.lastOutput.id}`} className="mono small" style={{ color: 'var(--text)', lineHeight: 1.6 }}>
-              {o.lastOutput.summary || o.lastOutput.title}
-            </a>
+          <span className="label">▶ Jarvis’s plan {o.plan ? <span className="faint">· {ago(o.plan.at)}</span> : null}</span>
+          {o.plan ? (
+            <div className="small" style={{ lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{o.plan.text}</div>
           ) : (
-            <span className="faint small">Nothing yet.</span>
+            <span className="faint small">{o.autonomy ? 'Jarvis plans the day every morning after 7:00, or press “Run Jarvis now”.' : 'Autonomy is off (Settings).'}</span>
           )}
+        </div>
+        <div className="panel col" style={{ gap: 4 }}>
+          <span className="label">▶ Live</span>
+          {(o.activity ?? []).slice(0, 12).map((a) => (
+            <div key={a.id} className="small" style={{ display: 'flex', gap: 8, lineHeight: 1.45 }}>
+              <span className="faint mono" style={{ flexShrink: 0 }}>{ago(a.ts)}</span>
+              <span className={a.kind === 'progress' || a.kind === 'lead' || a.kind === 'action' ? '' : 'muted'}>
+                <b>{a.agent}</b> {a.text}
+              </span>
+            </div>
+          ))}
+          {!(o.activity ?? []).length && <span className="faint small">Nothing happening yet.</span>}
         </div>
         <div className="panel col" style={{ gap: 8 }}>
           <span className="label">▶ Command</span>
@@ -181,11 +194,11 @@ export function OrgHome({ ctx }) {
 
 // Used everywhere work is handed out: org, department, team, agent or personal.
 export function GiveTask({ target, title, projectId = null, onClose }) {
-  const [form, setForm] = useState({ title: '', instructions: '', priority: 50 });
+  const [form, setForm] = useState({ title: '', instructions: '', dod: '', priority: 50 });
   const submit = async (e) => {
     e.preventDefault();
     try {
-      const { id } = await api('POST', '/api/tasks', { target, title: form.title, instructions: form.instructions, priority: Number(form.priority), project_id: projectId });
+      const { id } = await api('POST', '/api/tasks', { target, title: form.title, instructions: form.instructions, dod: form.dod, priority: Number(form.priority), project_id: projectId });
       toast('Task handed over');
       onClose(id);
     } catch (err) {
@@ -202,6 +215,10 @@ export function GiveTask({ target, title, projectId = null, onClose }) {
         <label className="field">
           <span>Details (optional)</span>
           <textarea className="input" value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} placeholder="Who, what, tone, deadline…" />
+        </label>
+        <label className="field">
+          <span>Definition of done (what must exist when finished)</span>
+          <textarea className="input" style={{ minHeight: 70 }} value={form.dod} onChange={(e) => setForm({ ...form, dod: e.target.value })} placeholder="e.g. crm/leads.csv has 20 verified rows with source URLs; 10 intro emails proposed" />
         </label>
         <label className="field">
           <span>Priority: {form.priority}</span>

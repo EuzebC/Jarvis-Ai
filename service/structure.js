@@ -1,8 +1,8 @@
 import { one, all, insert, run, tx, now } from './db.js';
 import { log, notify } from './events.js';
 import { extractJson } from './protocol.js';
-import { engine } from './engine.js';
-import { workDir } from './mind.js';
+import { runSession } from './brain/runtime.js';
+import { ensureWorkspace } from './brain/workspace.js';
 import { DEPARTMENT_COLORS, ensureOrgJarvis, periodLabels } from './agents.js';
 
 const str = (v, max = 400) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
@@ -70,9 +70,18 @@ export async function proposeStructure(orgId) {
   const org = one('SELECT * FROM orgs WHERE id = ?', orgId);
   const draftId = insert(`INSERT INTO drafts (org_id, status, created_at) VALUES (?, 'generating', ?)`, orgId, now());
   notify('drafts', { orgId });
-  const jarvis = one('SELECT * FROM agents WHERE id = ?', ensureOrgJarvis(orgId));
+  ensureOrgJarvis(orgId);
   log('info', `Jarvis is designing the structure for ${org.name}`, orgId);
-  const res = await engine.ask({ ...jarvis, web: 0 }, { prompt: prompt(org), system: 'You are an expert organisation designer for AI agent teams. Reply with JSON only.', cwd: workDir({ orgId }) });
+  const res = await runSession({
+    cwd: ensureWorkspace({ orgId }),
+    prompt: prompt(org),
+    append: 'You are an expert organisation designer for AI agent teams. Do not use any tools. Reply with JSON only.',
+    model: 'opus',
+    maxTurns: 3,
+    maxBudgetUsd: 2,
+    timeoutMs: 8 * 60_000,
+    disallowedTools: ['Agent', 'Task', 'Bash', 'Write', 'Edit', 'MultiEdit', 'WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'],
+  });
   const parsed = res.ok ? normaliseDraft(extractJson(res.text)) : null;
   if (parsed?.departments.length) {
     run(`UPDATE drafts SET status = 'ready', body = ? WHERE id = ?`, JSON.stringify(parsed), draftId);

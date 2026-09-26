@@ -1,16 +1,26 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { one, all, run, insert, now, getSetting, setSetting } from './db.js';
 import { log, notify, bus } from './events.js';
 import * as auth from './auth.js';
 import { route, readJson, readBody, send, HttpError, id, optId, text, maybe } from './http.js';
-import { engine, createTask, decideApproval, apiSpendThisMonth, apiCap } from './engine.js';
-import { agentForTarget, ensureOrgJarvis, DEPARTMENT_COLORS, periodLabels } from './agents.js';
+import { decideApproval, apiSpendThisMonth, apiCap } from './engine.js';
+import { scheduler, createMission } from './brain/missions.js';
+import { runOperator, currentPlan } from './brain/operator.js';
+import { chat, resetConversation } from './brain/chat.js';
+import { ensureOrgJarvis, DEPARTMENT_COLORS, periodLabels } from './agents.js';
 import { proposeStructure, applyDraft, latestDraft } from './structure.js';
-import { askJarvis } from './ask.js';
 import { addMemory, listMemories, saveKnowledge, resolveFile } from './mind.js';
 import { probe } from './providers/process.js';
 import { config } from './config.js';
 import { clampPriority } from './protocol.js';
+import { testHubspot } from './connectors/hubspot.js';
+import { testGmail } from './connectors/gmail.js';
+import { deliverQueued, dailyLimit, sentToday } from './outbox.js';
+import { defaultVault, initVault, syncMinds, writeBriefing } from './connectors/obsidian.js';
+import { listBlocked, blockContact, unblock } from './optout.js';
 
 const COOKIE = 'jarvis_session';
 const cookie = (token, maxAge) => `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
@@ -111,15 +121,18 @@ route('GET', '/api/overview', (req, res, ctx) => {
   const last = one(`SELECT id, title, summary FROM tasks WHERE status = 'done' AND ${scopeSql} AND created_by NOT LIKE 'review:%' ORDER BY finished_at DESC LIMIT 1`, ...scopeArgs);
   const agents = all(`SELECT status FROM agents WHERE ${scopeSql}`, ...scopeArgs);
   send(res, 200, {
-    paused: engine.paused,
-    engines: ['claude', 'codex', 'api'].map((p) => engine.status(p)),
+    paused: scheduler.paused,
+    autonomy: getSetting('autonomy', '1') === '1',
+    plan: orgId ? currentPlan(orgId) : null,
+    activity: all('SELECT * FROM activity WHERE (? IS NULL AND org_id IS NULL OR org_id = ?) ORDER BY id DESC LIMIT 20', orgId, orgId),
+    engines: [scheduler.status('claude'), scheduler.status('codex'), { name: 'api', enabled: Boolean(getSetting('anthropic_api_key')), running: 0, maxConcurrent: 0, cooldownUntil: null, available: false }],
     api: { spent: apiSpendThisMonth(), cap: apiCap(), keySet: Boolean(getSetting('anthropic_api_key')) },
     today: one(`SELECT COUNT(*) AS runs, SUM(outcome = 'ok') AS ok FROM runs WHERE started_at >= ?`, dayStart),
     pendingTotal: one(`SELECT COUNT(*) AS n FROM approvals WHERE status = 'pending'`).n,
     needsYou,
     lastOutput: last,
-    queued: one(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'queued' AND ${scopeSql}`, ...scopeArgs).n,
-    running: one(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'running' AND ${scopeSql}`, ...scopeArgs).n,
+    queued: one(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'queued' AND kind = 'mission' AND ${scopeSql}`, ...scopeArgs).n,
+    running: one(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'running' AND kind IN ('mission','operator') AND ${scopeSql}`, ...scopeArgs).n,
     agentsTotal: agents.length,
     agentsWorking: agents.filter((a) => a.status === 'working').length,
     departments: orgId ? departmentCards(orgId) : [],
@@ -516,7 +529,7 @@ route('GET', '/api/tasks', (req, res, ctx) => {
     res,
     200,
     all(
-      `SELECT t.id, t.org_id, t.project_id, t.title, t.status, t.summary, t.priority, t.provider, t.model, t.created_at, t.finished_at, a.name AS agent_name
+      `SELECT t.id, t.org_id, t.project_id, t.title, t.status, t.summary, t.priority, t.provider, t.model, t.created_at, t.finished_at, t.kind, t.dod, t.verify_status, t.round, t.live_status, a.name AS agent_name
        FROM tasks t LEFT JOIN agents a ON a.id = t.agent_id WHERE ${where.join(' AND ')}
        ORDER BY (t.status = 'running') DESC, (t.status = 'queued') DESC, t.id DESC LIMIT ?`,
       ...args,
@@ -527,17 +540,26 @@ route('GET', '/api/tasks', (req, res, ctx) => {
 
 route('POST', '/api/tasks', async (req, res) => {
   const b = await readJson(req);
-  const agent = agentForTarget(b.target);
-  if (!agent) throw new HttpError(400, 'Nobody can receive this task yet (add a leader or head first)');
-  const taskId = createTask({
-    agent,
-    title: text(b.title, 200, 'Title'),
-    instructions: maybe(b.instructions, 20_000) || b.title,
-    priority: clampPriority(b.priority),
-    projectId: optId(b.project_id),
-  });
-  engine.tick();
-  send(res, 201, { id: taskId });
+  const target = b.target ?? { type: 'personal' };
+  let orgId = null;
+  if (target.type === 'org') orgId = id(target.id);
+  else if (target.type === 'department') orgId = mustExist('departments', id(target.id), 'Department').org_id;
+  else if (target.type === 'team') orgId = one('SELECT d.org_id FROM teams t JOIN departments d ON d.id = t.department_id WHERE t.id = ?', id(target.id))?.org_id ?? null;
+  else if (target.type === 'agent') orgId = mustExist('agents', id(target.id), 'Agent').org_id;
+  try {
+    const missionId = createMission({
+      scope: { orgId },
+      target,
+      title: text(b.title, 200, 'Title'),
+      instructions: maybe(b.instructions, 20_000) || b.title,
+      dod: maybe(b.dod, 4000) ?? '',
+      priority: clampPriority(b.priority),
+      projectId: optId(b.project_id),
+    });
+    send(res, 201, { id: missionId });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
 });
 
 route('GET', '/api/tasks/:id', (req, res, ctx) => {
@@ -552,11 +574,11 @@ route('GET', '/api/tasks/:id', (req, res, ctx) => {
 });
 
 route('POST', '/api/tasks/:id/cancel', (req, res, ctx) => {
-  engine.cancel(id(ctx.params.id));
+  scheduler.cancel(id(ctx.params.id));
   send(res, 200, { ok: true });
 });
 route('POST', '/api/tasks/:id/retry', (req, res, ctx) => {
-  engine.retry(id(ctx.params.id));
+  scheduler.retry(id(ctx.params.id));
   send(res, 200, { ok: true });
 });
 
@@ -591,7 +613,28 @@ for (const [verb, approve] of [['approve', true], ['reject', false]]) {
 // ---------- ask Jarvis ----------
 route('POST', '/api/ask', async (req, res) => {
   const b = await readJson(req);
-  send(res, 200, await askJarvis({ text: text(b.text, 4000, 'Question'), orgId: optId(b.org_id) }));
+  const r = await chat({ scope: { orgId: optId(b.org_id) }, text: text(b.text, 4000, 'Question'), spoken: Boolean(b.spoken) });
+  send(res, 200, { reply: r.reply, ok: r.ok, tasks: [] });
+});
+
+route('POST', '/api/ask/reset', async (req, res) => {
+  const b = await readJson(req);
+  resetConversation({ orgId: optId(b.org_id) });
+  send(res, 200, { ok: true });
+});
+
+// ---------- the Operator ----------
+route('POST', '/api/orgs/:id/operator/run', async (req, res, ctx) => {
+  const orgId = mustExist('orgs', id(ctx.params.id), 'Organisation').id;
+  const b = await readJson(req);
+  runOperator(orgId, { mode: ['morning', 'midday', 'review', 'event'].includes(b.mode) ? b.mode : 'midday', reason: maybe(b.reason, 300) ?? 'requested by the owner' }).catch((err) => log('error', `Operator: ${err.message}`, orgId));
+  send(res, 202, { ok: true });
+});
+
+route('GET', '/api/activity', (req, res, ctx) => {
+  const orgId = optId(ctx.query.get('org'));
+  const limit = Math.min(Number(ctx.query.get('limit')) || 60, 300);
+  send(res, 200, all('SELECT * FROM activity WHERE (? IS NULL AND org_id IS NULL OR org_id = ?) ORDER BY id DESC LIMIT ?', orgId, orgId, limit));
 });
 
 // ---------- the mind: memories and knowledge files ----------
@@ -638,7 +681,7 @@ route('GET', '/api/files/:id/download', (req, res, ctx) => {
 });
 
 // ---------- settings & engines ----------
-const UI_KEYS = ['theme', 'core', 'retint', 'voice_wake', 'voice_speak'];
+const UI_KEYS = ['theme', 'core', 'retint', 'voice_wake', 'voice_speak', 'autonomy'];
 route('GET', '/api/settings', (req, res) => {
   send(res, 200, {
     theme: getSetting('theme', 'green'),
@@ -646,6 +689,7 @@ route('GET', '/api/settings', (req, res) => {
     retint: getSetting('retint', '1') === '1',
     voice_wake: getSetting('voice_wake', '1') === '1',
     voice_speak: getSetting('voice_speak', '1') === '1',
+    autonomy: getSetting('autonomy', '1') === '1',
     ownerProfile: getSetting('owner_profile', ''),
     apiKeySet: Boolean(getSetting('anthropic_api_key')),
     apiCap: apiCap(),
@@ -679,16 +723,16 @@ route('GET', '/api/engines/login', async (req, res) => {
 });
 
 route('POST', '/api/pause', (req, res) => {
-  engine.pause();
+  scheduler.pause();
   send(res, 200, { ok: true });
 });
 route('POST', '/api/resume', (req, res) => {
-  engine.resume();
+  scheduler.resume();
   send(res, 200, { ok: true });
 });
 route('POST', '/api/engines/:name/clear-cooldown', (req, res, ctx) => {
   if (!['claude', 'codex', 'api'].includes(ctx.params.name)) throw new HttpError(404, 'Unknown engine');
-  engine.clearCooldown(ctx.params.name);
+  scheduler.clearCooldown(ctx.params.name);
   send(res, 200, { ok: true });
 });
 
@@ -743,3 +787,176 @@ route(
   },
   { open: true },
 );
+
+// ---------- connectors: HubSpot and Gmail ----------
+// Keys and passwords are write-only: they are tested, stored, and never sent back to the app.
+
+route('GET', '/api/connectors', (req, res) => {
+  send(res, 200, {
+    hubspot: { connected: Boolean(getSetting('hubspot_token')) },
+    gmail: {
+      connected: Boolean(getSetting('gmail_address') && getSetting('gmail_app_password')),
+      address: getSetting('gmail_address', ''),
+      senderName: getSetting('gmail_sender_name', ''),
+      dailyLimit: dailyLimit(),
+      sentToday: sentToday(),
+      readReplies: getSetting('gmail_read_replies', '1') === '1',
+      queued: one(`SELECT COUNT(*) AS n FROM approvals WHERE delivery = 'queued'`).n,
+    },
+    signature: getSetting('email_signature', ''),
+    footer: getSetting('email_footer', "If you'd rather not hear from me, just reply and let me know."),
+  });
+});
+
+route('PUT', '/api/connectors/hubspot', async (req, res) => {
+  const { token } = await readJson(req);
+  const key = text(token, 500, 'HubSpot key');
+  try {
+    const message = await testHubspot(key);
+    setSetting('hubspot_token', key);
+    log('info', 'HubSpot connected');
+    notify('settings');
+    send(res, 200, { ok: true, message });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+});
+
+route('DELETE', '/api/connectors/hubspot', (req, res) => {
+  run(`DELETE FROM settings WHERE key = 'hubspot_token'`);
+  log('info', 'HubSpot disconnected');
+  notify('settings');
+  send(res, 200, { ok: true });
+});
+
+route('PUT', '/api/connectors/gmail', async (req, res) => {
+  const b = await readJson(req);
+  const address = text(b.address, 200, 'Gmail address').toLowerCase();
+  const password = text(b.appPassword, 100, 'App Password');
+  try {
+    const message = await testGmail(address, password);
+    setSetting('gmail_address', address);
+    setSetting('gmail_app_password', password);
+    if (typeof b.senderName === 'string') setSetting('gmail_sender_name', b.senderName.trim().slice(0, 80));
+    log('info', `Gmail connected (${address})`);
+    notify('settings');
+    deliverQueued().catch(() => {});
+    send(res, 200, { ok: true, message });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+});
+
+route('PUT', '/api/connectors/gmail/options', async (req, res) => {
+  const b = await readJson(req);
+  const limit = Number(b.dailyLimit);
+  if (Number.isFinite(limit) && limit >= 1) setSetting('gmail_daily_limit', Math.min(500, Math.round(limit)));
+  if (typeof b.readReplies === 'boolean') setSetting('gmail_read_replies', b.readReplies ? '1' : '0');
+  if (typeof b.senderName === 'string') setSetting('gmail_sender_name', b.senderName.trim().slice(0, 80));
+  if (typeof b.signature === 'string') setSetting('email_signature', b.signature.slice(0, 2000));
+  if (typeof b.footer === 'string') setSetting('email_footer', b.footer.slice(0, 500));
+  notify('settings');
+  send(res, 200, { ok: true });
+});
+
+route('DELETE', '/api/connectors/gmail', (req, res) => {
+  run(`DELETE FROM settings WHERE key IN ('gmail_address', 'gmail_app_password', 'gmail_last_uid')`);
+  log('info', 'Gmail disconnected');
+  notify('settings');
+  send(res, 200, { ok: true });
+});
+
+// Re-queue an approved email whose sending failed, or one approved before Gmail was connected.
+route('POST', '/api/approvals/:id/send', (req, res, ctx) => {
+  const a = mustExist('approvals', id(ctx.params.id), 'Approval');
+  if (a.status !== 'approved') throw new HttpError(400, 'Only approved items can be sent');
+  if (a.delivery === 'sent') throw new HttpError(400, 'Already sent');
+  run(`UPDATE approvals SET delivery = 'queued', delivery_note = 'Queued for sending…' WHERE id = ?`, a.id);
+  deliverQueued().catch(() => {});
+  notify('approvals');
+  send(res, 200, { ok: true });
+});
+
+// ---------- Obsidian ----------
+const OBSIDIAN_FEATURES = ['reports', 'briefing', 'minds', 'knowledge'];
+
+// Adds the vault to Obsidian's own list so it shows up (and opens) in Obsidian.
+function registerVault(dir) {
+  const cfgDir = path.join(process.env.APPDATA || '', 'obsidian');
+  const cfgFile = path.join(cfgDir, 'obsidian.json');
+  let cfg = {};
+  try {
+    cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+  } catch {
+    // Obsidian has not been opened yet
+  }
+  cfg.vaults ??= {};
+  if (Object.values(cfg.vaults).some((v) => path.resolve(v.path) === path.resolve(dir))) return;
+  for (const v of Object.values(cfg.vaults)) delete v.open;
+  cfg.vaults[crypto.randomBytes(8).toString('hex')] = { path: dir, ts: Date.now(), open: true };
+  fs.mkdirSync(cfgDir, { recursive: true });
+  fs.writeFileSync(cfgFile, JSON.stringify(cfg));
+}
+
+route('GET', '/api/connectors/obsidian', (req, res) => {
+  send(res, 200, {
+    vault: getSetting('obsidian_vault', ''),
+    suggested: defaultVault(),
+    ...Object.fromEntries(OBSIDIAN_FEATURES.map((f) => [f, getSetting(`obsidian_${f}`, '1') === '1'])),
+    lastBriefing: getSetting('obsidian_last_briefing', ''),
+  });
+});
+
+route('PUT', '/api/connectors/obsidian', async (req, res) => {
+  const b = await readJson(req);
+  if (typeof b.vault === 'string') {
+    const dir = b.vault.trim();
+    if (dir) {
+      if (!path.isAbsolute(dir)) throw new HttpError(400, 'Use a full folder path, e.g. C:\\Users\\you\\Documents\\Jarvis Vault');
+      initVault(dir);
+      registerVault(dir);
+      setSetting('obsidian_vault', dir);
+      log('info', `Obsidian vault connected: ${dir}`);
+      syncMinds();
+      writeBriefing(true);
+    } else {
+      run(`DELETE FROM settings WHERE key = 'obsidian_vault'`);
+      log('info', 'Obsidian disconnected');
+    }
+  }
+  for (const f of OBSIDIAN_FEATURES) if (typeof b[f] === 'boolean') setSetting(`obsidian_${f}`, b[f] ? '1' : '0');
+  notify('settings');
+  send(res, 200, { ok: true });
+});
+
+route('POST', '/api/connectors/obsidian/sync', (req, res) => {
+  if (!getSetting('obsidian_vault')) throw new HttpError(400, 'Connect a vault first');
+  const minds = syncMinds();
+  writeBriefing(true);
+  send(res, 200, { ok: true, message: `Vault updated (${minds} mind note(s) changed, briefing refreshed)` });
+});
+
+// Opens the vault in Obsidian on this computer.
+route('POST', '/api/connectors/obsidian/open', (req, res) => {
+  const vault = getSetting('obsidian_vault');
+  if (!vault) throw new HttpError(400, 'Connect a vault first');
+  const uri = `obsidian://open?path=${encodeURIComponent(path.join(vault, 'Jarvis.md'))}`;
+  spawn('cmd', ['/c', 'start', '""', uri], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  send(res, 200, { ok: true });
+});
+
+// ---------- do-not-contact list ----------
+route('GET', '/api/do-not-contact', (req, res, ctx) => send(res, 200, listBlocked(optId(ctx.query.get('org')))));
+route('POST', '/api/do-not-contact', async (req, res) => {
+  const b = await readJson(req);
+  try {
+    blockContact({ orgId: optId(b.org_id), email: text(b.email, 200, 'Email'), reason: maybe(b.reason, 300) ?? 'Added by the owner' });
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
+  send(res, 201, { ok: true });
+});
+route('DELETE', '/api/do-not-contact/:id', (req, res, ctx) => {
+  unblock(id(ctx.params.id));
+  send(res, 200, { ok: true });
+});

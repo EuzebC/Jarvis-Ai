@@ -140,6 +140,54 @@ function addColumn(table, column, definition) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 addColumn('tasks', 'blocked_by', 'INTEGER REFERENCES tasks(id) ON DELETE SET NULL');
+// Second-generation brain: missions with a definition of done, verification rounds and live status.
+addColumn('tasks', 'kind', "TEXT NOT NULL DEFAULT 'mission'"); // mission | operator | review | chat
+addColumn('tasks', 'dod', 'TEXT');
+addColumn('tasks', 'verify_status', 'TEXT'); // pending | passed | failed | skipped
+addColumn('tasks', 'verify_note', 'TEXT');
+addColumn('tasks', 'round', 'INTEGER NOT NULL DEFAULT 1');
+addColumn('tasks', 'session_id', 'TEXT');
+addColumn('tasks', 'live_status', 'TEXT');
+addColumn('tasks', 'target', 'TEXT'); // JSON {type: org|department|team|agent|personal, id}
+addColumn('approvals', 'route', 'TEXT'); // owner | leader | auto
+db.exec(`
+-- Live feed of what agents are doing right now (tool calls, milestones).
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, org_id INTEGER, task_id INTEGER, agent TEXT, kind TEXT NOT NULL, text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS activity_recent ON activity(org_id, id);
+-- Resumable conversations ("Talk to Jarvis") and Operator sessions, one per workspace.
+CREATE TABLE IF NOT EXISTS sessions_sdk (
+  key TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
+`);
+// Delivery of approved outgoing work: queued -> sent | manual | failed.
+addColumn('approvals', 'delivery', 'TEXT');
+addColumn('approvals', 'delivery_note', 'TEXT');
+addColumn('approvals', 'sent_at', 'INTEGER');
+
+db.exec(`
+-- Every email Jarvis sent, so replies can be matched and logged.
+CREATE TABLE IF NOT EXISTS sent_emails (
+  id INTEGER PRIMARY KEY, approval_id INTEGER REFERENCES approvals(id) ON DELETE SET NULL,
+  org_id INTEGER REFERENCES orgs(id) ON DELETE CASCADE, team_id INTEGER,
+  message_id TEXT NOT NULL, to_email TEXT NOT NULL, subject TEXT NOT NULL,
+  hs_contact_id TEXT, hs_company_id TEXT, hs_deal_id TEXT, sent_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sent_emails_to ON sent_emails(to_email);
+
+-- People who must never be contacted again (per organisation; org_id NULL = everywhere).
+CREATE TABLE IF NOT EXISTS do_not_contact (
+  id INTEGER PRIMARY KEY, org_id INTEGER REFERENCES orgs(id) ON DELETE CASCADE,
+  email TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'owner', created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS dnc_unique ON do_not_contact(COALESCE(org_id, 0), email);
+
+CREATE TABLE IF NOT EXISTS replies (
+  id INTEGER PRIMARY KEY, sent_email_id INTEGER REFERENCES sent_emails(id) ON DELETE CASCADE,
+  from_email TEXT NOT NULL, subject TEXT, body TEXT, received_at INTEGER NOT NULL, uid TEXT UNIQUE
+);
+`);
 
 export const now = () => Date.now();
 

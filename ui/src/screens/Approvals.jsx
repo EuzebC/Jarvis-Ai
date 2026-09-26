@@ -66,8 +66,16 @@ export function ApprovalCard({ a, compact = false }) {
         </div>
       ) : (
         <div className="row small">
-          <Pill status={a.status} />
-          <span className="muted grow">{a.decided_by === 'leader' ? `By the team leader: ${a.note}` : a.note}</span>
+          <Pill status={a.delivery === 'sent' ? 'done' : a.delivery === 'failed' ? 'failed' : a.status}>{a.delivery === 'sent' ? 'sent' : a.delivery === 'queued' ? 'sending' : a.delivery === 'failed' ? 'not sent' : a.status}</Pill>
+          <span className="muted grow">
+            {a.decided_by === 'leader' ? 'By the team leader. ' : ''}
+            {a.delivery_note ?? a.note}
+          </span>
+          {a.status === 'approved' && ['failed', 'manual', null].includes(a.delivery ?? null) && (d.to || '').includes('@') && (
+            <button type="button" className="btn small primary" disabled={busy} onClick={() => api('POST', `/api/approvals/${a.id}/send`).then(() => toast('Sending…')).catch((e) => toast(e.message, true))}>
+              Send
+            </button>
+          )}
           {a.status === 'approved' && (
             <button type="button" className="btn small" onClick={() => navigator.clipboard.writeText(textOf(a)).then(() => toast('Copied, ready to send'))}>
               Copy

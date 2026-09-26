@@ -17,6 +17,9 @@ import {
 import { runClaude } from './providers/claude.js';
 import { runCodex } from './providers/codex.js';
 import { runAnthropicApi } from './providers/anthropic-api.js';
+import { routeApproved } from './outbox.js';
+import { hubspotConnected, addLead } from './connectors/hubspot.js';
+import { syncKnowledge, writeReport } from './connectors/obsidian.js';
 
 // Pacing per engine. Subscriptions refill on a timer, so quota is the budget: limited concurrency
 // and runs per hour spread work out, and a usage-limit error pauses that engine until it resets.
@@ -70,16 +73,32 @@ export function decideApproval(id, approve, by = 'owner', note = null) {
   if (!a) throw new Error('Approval not found');
   if (a.status !== 'pending') throw new Error(`Already ${a.status}`);
   if (a.kind === 'payment' && by !== 'owner') throw new Error('Payments can only be approved by the owner');
-  const outcome = approve
-    ? note ?? 'Approved. It is in the Outbox, ready to send (automatic sending arrives with the email and CRM connectors).'
-    : note ?? 'Rejected.';
-  run('UPDATE approvals SET status = ?, decided_by = ?, note = ?, decided_at = ? WHERE id = ?', approve ? 'approved' : 'rejected', by, outcome, now(), id);
+  run('UPDATE approvals SET status = ?, decided_by = ?, note = ?, decided_at = ? WHERE id = ?', approve ? 'approved' : 'rejected', by, note ?? (approve ? 'Approved.' : 'Rejected.'), now(), id);
+  // Approved emails and proposals go to the Outbox and are sent from Gmail when connected.
+  const outcome = approve ? routeApproved(one('SELECT * FROM approvals WHERE id = ?', id)) : note ?? 'Rejected.';
   log('info', `${by === 'owner' ? 'You' : 'Team leader'} ${approve ? 'approved' : 'rejected'}: ${a.summary}`, a.org_id);
   notify('approvals', { orgId: a.org_id });
   return { status: approve ? 'approved' : 'rejected', note: outcome };
 }
 
+// Word overlap between two summaries (0..1), used to merge near-duplicate requests.
+const words = (s) => new Set(String(s).toLowerCase().match(/[a-z0-9_.]{3,}/g) ?? []);
+export function similarity(a, b) {
+  const x = words(a);
+  const y = words(b);
+  if (!x.size || !y.size) return 0;
+  let shared = 0;
+  for (const w of x) if (y.has(w)) shared++;
+  return shared / (x.size + y.size - shared);
+}
+
 function createApproval(task, action) {
+  // Several agents often raise the same question; keep one request instead of a pile.
+  // Emails and proposals to different people are never merged.
+  if (!['email', 'proposal'].includes(action.kind)) {
+    const pending = all(`SELECT id, summary FROM approvals WHERE status = 'pending' AND kind = ? AND org_id IS ?`, action.kind, task.org_id);
+    if (pending.some((p) => similarity(p.summary, action.summary) >= 0.3)) return null;
+  }
   const id = insert(
     'INSERT INTO approvals (task_id, org_id, team_id, kind, summary, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     task.id,
@@ -139,12 +158,17 @@ function applyResult(task, agent, parsed) {
       created.subtasks++;
     }
     for (const a of parsed.actions) {
-      createApproval(task, a);
-      created.approvals++;
+      if (createApproval(task, a)) created.approvals++;
     }
     for (const m of parsed.memories) addMemory({ orgId: task.org_id, projectId: task.org_id ? null : task.project_id, content: m, source: 'agent' });
     applyUpdates(agent, parsed);
   });
+  if (parsed.leads.length && hubspotConnected()) {
+    Promise.allSettled(parsed.leads.map((l) => addLead(l))).then((results) => {
+      const ok = results.filter((r) => r.status === 'fulfilled').length;
+      log(ok ? 'info' : 'warn', `HubSpot: ${ok} of ${parsed.leads.length} lead(s) from ${agent.name} added`, task.org_id);
+    });
+  }
   if (created.dropped) log('warn', `${agent.name}: ${created.dropped} delegation(s) skipped (unknown assignee or swarm limit)`, task.org_id);
   if (created.approvals) notify('approvals', { orgId: task.org_id });
   notify('goals', { orgId: task.org_id });
@@ -291,6 +315,13 @@ class Engine {
     const review = task.created_by.startsWith('review:');
     const scope = { orgId: task.org_id, projectId: task.org_id ? null : task.project_id };
     const cwd = workDir(scope);
+    if (!review) {
+      try {
+        syncKnowledge(scope, cwd);
+      } catch (err) {
+        log('warn', `Obsidian notes not synced: ${err.message}`, task.org_id);
+      }
+    }
     const prompt = review ? task.instructions : this.buildPrompt(task);
     const system = review ? `You are ${agent.name}, a careful team leader.` : systemPrompt(agent, task);
     const res = await this.call(provider, agent, { prompt, system, cwd, signal: controller.signal, taskId: task.id });
@@ -305,6 +336,7 @@ class Engine {
         const parsed = parseAgentOutput(res.text);
         const created = applyResult(fresh, agent, parsed);
         const files = registerOutputs(scope, task.id, startedAt);
+        writeReport(one('SELECT * FROM tasks WHERE id = ?', task.id), agent);
         log(
           'info',
           `✔ ${agent.name} finished: ${task.title}` +

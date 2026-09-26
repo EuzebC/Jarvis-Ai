@@ -1,5 +1,6 @@
 import { one, all, insert, now } from './db.js';
 import { mindText } from './mind.js';
+import { optOutText } from './optout.js';
 
 export const DEPARTMENT_COLORS = ['#ff8a3d', '#3fb5ff', '#b36bff', '#ff5a5a', '#ffd23f', '#39e58c', '#ff6fb1', '#29d3f5'];
 
@@ -64,7 +65,7 @@ export const prefersCodex = (agent) =>
 
 export function agentTools(agent) {
   const tools = ['Read', 'Glob', 'Grep'];
-  if (agent.tier === 'worker' || agent.tier === 'leader') tools.push('Write');
+  tools.push('Write'); // every tier can save deliverables; writes stay inside the workspace folder
   if (/engineer|developer|coder|programmer|software/i.test(agent.role)) tools.push('Edit');
   if (agent.web) tools.push('WebSearch', 'WebFetch');
   return tools;
@@ -197,6 +198,7 @@ ${mindText(scope)}
 
 ${hierarchy(agent)}
 YOUR STANDING INSTRUCTIONS: ${agent.instructions || '(none)'}
+${optOutText(agent.org_id)}
 ${goals.length ? `GOALS THAT APPLY:\n${goals.join('\n')}` : ''}
 ${kpis.length ? `KPIS YOU AFFECT:\n${kpis.join('\n')}` : ''}
 
@@ -212,13 +214,15 @@ OUTPUT FORMAT: write your report in Markdown, then end with exactly one fenced j
 \`\`\`json
 {"summary": "one or two sentences",
  "subtasks": [${canDelegate ? '{"assignee": "<exactly as listed below>", "title": "short title", "instructions": "complete, self-contained instructions", "priority": 50, "after": null}' : ''}],
- "actions": [{"kind": "email | proposal | post | call | payment | contract | purchase | other", "summary": "one line", "details": {"to": "", "subject": "", "body": ""}}],
+ "actions": [{"kind": "email | proposal | post | call | payment | contract | purchase | other", "summary": "one line", "details": {"to": "name@company.com", "to_name": "", "company": "", "website": "", "subject": "", "body": "", "amount": null}}],
+ "leads": [{"company": "", "website": "", "name": "", "email": "", "phone": "", "notes": "why they fit"}],
  "memories": ["a lasting fact worth remembering here"],
  "kpi_updates": [{"name": "<exact KPI name>", "add": 1}],
  "goal_updates": [{"title": "<exact goal title>", "progress": 50}]}
 \`\`\`
 ${canDelegate ? `You may delegate to:\n${who}\nIndependent subtasks run in parallel. If a subtask needs another one's result, set "after" to that subtask's position in your list (1 = first); it then starts when that one finishes and receives its report.` : 'You cannot delegate; leave "subtasks" empty.'}
 Use empty arrays when there is nothing to report. Only update KPIs and goals you actually moved.
+For emails and proposals, "to" must be a real address you found (never guessed); the owner's signature is added automatically, so end the body with just your sign-off. List every real lead you found in "leads" so it is added to the CRM.
 Memories are for lasting facts about the business, its clients and the owner's preferences. Never remember things about your own tools, this run or temporary problems, and never store secrets.`;
 }
 

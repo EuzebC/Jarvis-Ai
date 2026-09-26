@@ -1,25 +1,30 @@
 # Jarvis for Windows
 
-Jarvis runs your organisations and personal projects with teams of AI agents. It works on the **Claude Code and Codex subscriptions** you already pay for, and uses a capped API key only as a backup.
+Jarvis runs your organisations and personal projects with teams of AI agents, on the **Claude Code and Codex subscriptions** you already pay for. It works on its own: every morning it looks at the goals, decides what the organisation should do, hands out missions, verifies the results, and comes to you only for money, contracts, deletions and the first message to a new contact.
 
-- **Personal:** Projects → Tasks.
-- **Organisations:** Departments → Teams → Agents, plus Projects → Tasks.
-  - Every department has a **head** and every team has a **team leader**.
-  - Leaders turn tasks into assignments for their agents, and steps can wait on each other ("find leads" → "check sites" → "write email").
-  - **Goals** at quarter, month and week level for the organisation, departments and teams.
-  - **KPIs** for departments, teams and individual agents. Agents update them as they work.
-- **Every organisation and project has its own mind:** a profile, memories (from you and learned by agents) and knowledge files. Nothing is shared between workspaces.
-- **Jarvis proposes, you edit.** Describe a company and Jarvis designs the whole structure. You review it before anything is created.
-- **Approvals:**
-  - Anything leaving the company (emails, proposals, posts, calls, contracts) waits for you at first.
-  - Each team has a "team leader can approve" switch, off until you trust the team.
-  - **Payments always need you.**
-- **Voice:**
-  - Say **"Jarvis"** (the wake word is detected offline, on this PC) or press **Ctrl+Space** anywhere.
-  - Jarvis answers out loud.
-- **Iron Man HUD:**
-  - 5 colour themes and 4 core animations.
-  - The interface retints to each department's colour as you go deeper.
+## How Jarvis runs a company
+
+1. **The Operator** (Jarvis) wakes up after 7:00, at mid-day and in the evening, and whenever something happens (a reply, a finished mission). It reads the goals, KPIs, pipeline, replies, the mission board, its memory and your Obsidian notes, then creates 2 to 5 **missions** for departments and teams and writes the day's plan (shown on Home and in Obsidian).
+2. **A mission** is an outcome with a *definition of done* ("crm/leads.csv has 20 verified rows; 10 intro emails proposed"). It runs as one real Claude Code session led by the department head or team leader, who delegates to the team as subagents, does research on the web and in a headless browser, runs code, and saves deliverables in the organisation's workspace.
+3. **Verification.** When the session ends, deterministic checks (files exist, row counts, no placeholders) and a verifier session judge the deliverable. A failed mission is sent back with feedback, up to three rounds. "Done" means delivered.
+4. **Actions leave the company only through `propose_action`.** Policy routes each one: later messages to a contact who replied send automatically; the first message to a new contact goes to you (or to the team leader when you switch that on); money, contracts and deletions always go to you. Questions to the owner are refused: agents decide and note their assumption.
+5. **Delivery.** Approved emails and proposals are sent from Gmail (daily limit), logged in HubSpot with contacts, companies and deals, and replies come back as new missions. Opt-outs are handled automatically.
+
+## Where agents can and cannot go
+
+Each organisation has one folder under `%LOCALAPPDATA%\Jarvis\orgs\<id>\`:
+
+```
+CLAUDE.md     the organisation's mind, structure, goals, KPIs, policy and tool guide (generated)
+MEMORY.md     lasting facts, maintained by the agents
+knowledge/    your documents and Obsidian notes (read-only for agents)
+crm/          leads.csv, contacts
+projects/     software and websites the agents build
+outputs/      documents, lists, reports for you
+journal/      one file per mission with progress and assumptions; the daily plan
+```
+
+Sessions have the full toolset (shell, files, web search and fetch, headless browser, subagents) but every file path and shell command is checked against the folder: anything outside is refused. Your personal claude.ai connectors and Claude Code plugins are never exposed to the agents.
 
 ## Run it
 
@@ -28,32 +33,34 @@ cd D:\Jarvis
 npm start
 ```
 
-The first time, Jarvis asks you to create a password. After that:
+First run: create a password in the window. Closing the window keeps the agents working (Jarvis stays in the tray and starts with Windows). Tray → **Quit and stop all agents** stops everything. Reset the password with `npm run set-password`.
 
-- Closing the window keeps the agents working. Jarvis stays in the tray.
-- **Jarvis starts with Windows** (turn this off in Settings → This computer).
-- Tray menu → **Quit and stop all agents** stops everything.
+**Requirements:** Claude Code signed in (`claude`, then `/login`). Optional: Codex (`codex login`) for building software when Claude is out of quota, an Anthropic API key with a monthly cap as a last resort, HubSpot Service Key, Gmail App Password, Obsidian vault (all in Settings → Connectors).
 
-To reset the password: `npm run set-password`. This signs out every device.
+## Talking to Jarvis
 
-## Requirements
-
-- Claude Code and/or Codex installed and signed in (`claude`, then `/login`; `codex login`). Settings shows the sign-in status.
-- Optional: an Anthropic API key and a monthly cap in Settings, used only when both subscriptions are out of quota.
+Say **“Jarvis”** or press **Ctrl+Space** anywhere. It's one continuous conversation per organisation, so Jarvis remembers what you discussed, answers from the live state, and creates missions when you ask for work.
 
 ## How it's built
 
 ```
-app/        Electron shell: window, tray, Ctrl+Space, start with Windows
-service/    Background service (Node): database, agent engine, API, voice model
-  engine.js     Quota-aware scheduler, delegation chains, approvals, KPI/goal updates
-  agents.js     Hierarchy, routing (Opus for leaders, Sonnet for workers, Haiku for bulk), prompts
-  structure.js  "Jarvis proposes" organisation design
-  ask.js        Talking to Jarvis (typed or spoken)
-  mind.js       Memories, knowledge files, workspaces, results
-  providers/    Claude Code, Codex, Anthropic API (backup)
-ui/         React app (the HUD), served by the service
-test/       node --test
+app/                 Electron shell: window, tray, Ctrl+Space, start with Windows
+service/server.js    Background service: API, timers (Outbox, replies, Operator, Obsidian)
+service/brain/
+  runtime.js         One sandboxed Claude Agent SDK session: tools, subagents, live progress, limits
+  workspace.js       The organisation folder, CLAUDE.md generation, sandbox rules
+  tools.js           Jarvis's MCP tools for agents: propose_action, add_lead, delegate, update_kpi…
+  policy.js          Who approves what
+  proposals.js       Policy-aware routing of outgoing actions to auto-send / leader / owner
+  missions.js        Missions, team-as-subagents, verification loop, scheduler
+  operator.js        The autonomy loop that runs each organisation
+  chat.js            Persistent conversation with memory
+  browser.js         Headless Chromium via Playwright MCP
+service/connectors/  HubSpot, Gmail, Obsidian
+service/outbox.js    Sending, daily limits, replies
+service/optout.js    Do-not-contact list
+ui/                  The HUD (React), served by the service
+test/                node --test
 ```
 
-Data lives in `%LOCALAPPDATA%\Jarvis`, so reinstalling never loses your organisations. The service listens only on `127.0.0.1:7777`.
+Data lives in `%LOCALAPPDATA%\Jarvis`. The service listens only on `127.0.0.1:7777`.

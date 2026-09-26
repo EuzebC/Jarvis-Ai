@@ -50,6 +50,12 @@ export function parseAgentOutput(text) {
         details: isObj(a.details) ? a.details : {},
       }))
       .filter((a) => a.summary),
+    // Leads found by agents go straight into the CRM (nothing is sent, so no approval needed).
+    leads: arr(d.leads)
+      .filter(isObj)
+      .map((l) => ({ company: str(l.company).slice(0, 120), website: str(l.website).slice(0, 200), name: str(l.name).slice(0, 80), email: str(l.email).slice(0, 120), phone: str(l.phone).slice(0, 40), notes: str(l.notes).slice(0, 500) }))
+      .filter((l) => l.company || l.email)
+      .slice(0, 50),
     memories: arr(d.memories).map(str).filter(Boolean).slice(0, 5).map((m) => m.slice(0, 500)),
     kpiUpdates: arr(d.kpi_updates || d.kpiUpdates)
       .filter(isObj)

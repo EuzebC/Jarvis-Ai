@@ -43,6 +43,24 @@ export default function TaskView({ id }) {
         <span>created {ago(t.created_at)} by {t.created_by.startsWith('review:') ? 'an approval review' : t.created_by}</span>
         {t.cost_usd > 0 && <span className="mono">API ${t.cost_usd.toFixed(3)}</span>}
       </div>
+      {(t.dod || t.verify_status || t.live_status) && (
+        <div className="panel col" style={{ gap: 6 }}>
+          {t.dod && (
+            <>
+              <span className="label">▶ Definition of done</span>
+              <div className="small" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{t.dod}</div>
+            </>
+          )}
+          {t.live_status && t.status === 'running' && <div className="small mono" style={{ color: 'var(--p)' }}>NOW: {t.live_status}</div>}
+          {t.verify_status && (
+            <div className="small" style={{ color: t.verify_status === 'passed' ? 'var(--ok)' : t.verify_status === 'failed' ? 'var(--bad)' : 'var(--muted)' }}>
+              Verification {t.verify_status}
+              {t.round > 1 ? ` (round ${t.round})` : ''}
+              {t.verify_note ? `: ${t.verify_note}` : ''}
+            </div>
+          )}
+        </div>
+      )}
       {t.error && t.status !== 'done' && (
         <div className="panel" style={{ borderColor: 'var(--bad)', color: '#ffd0d0', whiteSpace: 'pre-wrap' }}>
           {t.error}

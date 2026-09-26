@@ -4,6 +4,7 @@ import { THEMES, CORES } from '../theme.js';
 import Reactor from '../components/Reactor.jsx';
 import { Switch, toast } from '../components/ui.jsx';
 import { voice } from '../voice.js';
+import Connectors from './Connectors.jsx';
 
 const desktop = window.jarvisDesktop;
 
@@ -139,6 +140,19 @@ export default function Settings({ ctx, reload }) {
           </div>
         </section>
       </div>
+
+      <section className="panel col" style={{ gap: 12 }}>
+        <span className="label">▶ Autonomy</span>
+        <div className="row between">
+          <div>
+            <div>Jarvis runs the organisations itself</div>
+            <div className="small muted">Every morning after 7:00 it plans the day and creates missions; it checks in at mid-day and reviews in the evening. You only approve money, contracts, deletions and the first message to a new contact.</div>
+          </div>
+          <Switch checked={s.autonomy !== false} label="Autonomy" onChange={(v) => save({ autonomy: v }, v ? 'Jarvis will run the organisations itself' : 'Autonomy off: Jarvis only does what you assign')} />
+        </div>
+      </section>
+
+      <Connectors orgId={ctx.orgId} />
 
       <section className="panel col" style={{ gap: 12 }}>
         <span className="label">▶ This computer</span>

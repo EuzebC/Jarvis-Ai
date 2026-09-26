@@ -135,7 +135,7 @@ export function useAsk(orgId) {
       setBusy(true);
       setReply(null);
       try {
-        const r = await api('POST', '/api/ask', { text, org_id: orgId });
+        const r = await api('POST', '/api/ask', { text, org_id: orgId, spoken: speak });
         setReply(r);
         if (speak) voice.speak(r.reply);
       } catch (e) {

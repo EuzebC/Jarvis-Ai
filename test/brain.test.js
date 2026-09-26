@@ -1,0 +1,122 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+process.env.JARVIS_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'jarvis-brain-'));
+const policy = await import('../service/brain/policy.js');
+const ws = await import('../service/brain/workspace.js');
+const { insert, one, now } = await import('../service/db.js');
+const { proposeAction } = await import('../service/brain/proposals.js');
+const { appendLead, readLeads } = await import('../service/brain/tools.js');
+const { createMission, leaderFor, teamAsSubagents } = await import('../service/brain/missions.js');
+const { applyDraft } = await import('../service/structure.js');
+const { ensureOrgJarvis } = await import('../service/agents.js');
+
+test('policy: owner only for money, first contact to owner, replies continue automatically, questions declined', () => {
+  assert.equal(policy.routeAction({ kind: 'payment' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'deletion' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'email' }).route, 'owner');
+  assert.equal(policy.routeAction({ kind: 'email', leaderCanApprove: true }).route, 'leader');
+  assert.equal(policy.routeAction({ kind: 'email', contactHasReplied: true }).route, 'auto');
+  assert.equal(policy.routeAction({ kind: 'email', hasRecipient: false }).route, 'decline');
+  assert.equal(policy.routeAction({ kind: 'other', summary: 'Owner: confirm the do-not-contact list is complete' }).route, 'decline');
+  assert.equal(policy.routeAction({ kind: 'other', summary: 'Which approach should we take?' }).route, 'decline');
+  assert.equal(policy.routeAction({ kind: 'other', summary: 'Submit the enquiry form on their website with our pitch' }).route, 'owner');
+  assert.equal(policy.hasPlaceholders('Dear [Client], your [AMOUNT]'), true);
+  assert.equal(policy.hasPlaceholders('Dear Dr Uwase, 450,000 RWF'), false);
+});
+
+test('sandbox: paths and shell commands are confined to the workspace', () => {
+  const root = path.join(os.tmpdir(), 'jarvis-ws', 'org-1');
+  assert.equal(ws.insideSandbox(root, path.join(root, 'crm', 'leads.csv')), true);
+  assert.equal(ws.insideSandbox(root, path.join(os.tmpdir(), 'jarvis-ws', 'org-2', 'a.txt')), false);
+  assert.equal(ws.insideSandbox(root, path.join(root, '..', 'org-2')), false);
+  assert.equal(ws.commandAllowed(root, 'python scripts/run.py > outputs/a.txt').ok, true);
+  assert.equal(ws.commandAllowed(root, `type "${path.join(root, 'crm', 'leads.csv')}"`).ok, true);
+  assert.equal(ws.commandAllowed(root, 'type C:\\Users\\HP\\secret.txt').ok, false);
+  assert.equal(ws.commandAllowed(root, 'cat /c/Users/HP/secret.txt').ok, false);
+  assert.equal(ws.commandAllowed(root, 'cat ~/.ssh/id_rsa').ok, false);
+  assert.equal(ws.commandAllowed(root, 'shutdown /s /t 0').ok, false);
+  assert.equal(ws.commandAllowed(root, 'rm -rf /').ok, false);
+  assert.equal(ws.commandAllowed(root, 'cat ../../other/file').ok, false);
+});
+
+// A small organisation to route proposals and missions through.
+const orgId = insert('INSERT INTO orgs (name, profile, created_at, updated_at) VALUES (?, ?, ?, ?)', 'Brain Co', 'We sell websites.', now(), now());
+ensureOrgJarvis(orgId);
+applyDraft(orgId, {
+  org_goals: [],
+  departments: [
+    {
+      name: 'Sales',
+      head: { name: 'Nova', role: 'Head of Sales' },
+      goals: [],
+      kpis: [{ name: 'Leads added', target: 100, unit: '' }],
+      teams: [{ name: 'Outreach', leader: { name: 'Atlas', role: 'Lead' }, kpis: [], agents: [{ name: 'Echo', role: 'Writer', grade: 'worker' }, { name: 'Scout', role: 'Finder', grade: 'bulk', web: true }] }],
+    },
+  ],
+});
+const scope = { orgId };
+const team = one('SELECT * FROM teams LIMIT 1');
+const atlas = one(`SELECT * FROM agents WHERE name = 'Atlas'`);
+
+test('workspace: CLAUDE.md carries the mind, structure, policy and tool guide', () => {
+  const dir = ws.writeClaudeMd(scope);
+  const md = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
+  assert.match(md, /# Brain Co/);
+  assert.match(md, /We sell websites/);
+  assert.match(md, /### Sales/);
+  assert.match(md, /Team \*\*Outreach\*\*: leader Atlas/);
+  assert.match(md, /propose_action/);
+  assert.match(md, /Do-not-contact list/);
+  for (const sub of ['knowledge', 'crm', 'projects', 'outputs', 'journal']) assert.ok(fs.existsSync(path.join(dir, sub)));
+  assert.ok(fs.existsSync(path.join(dir, 'MEMORY.md')));
+});
+
+test('proposals: refuse missing recipients and placeholders, route first contact to the owner, auto-send after a reply', () => {
+  const task = { id: null, team_id: team.id, org_id: orgId };
+  assert.match(proposeAction({ scope, task, kind: 'email', summary: 'x', details: {} }).message, /real recipient/);
+  assert.match(proposeAction({ scope, task, kind: 'email', summary: 'x', details: { to: 'a@b.rw', body: 'Dear [Client]' } }).message, /placeholders/);
+  const first = proposeAction({ scope, task, kind: 'email', summary: 'Intro to Smile', details: { to: 'dr@smile.rw', subject: 'Hi', body: 'Real text' } });
+  assert.equal(first.route, 'owner');
+  assert.equal(one('SELECT status FROM approvals WHERE id = ?', first.approvalId).status, 'pending');
+  const sent = insert(`INSERT INTO sent_emails (org_id, message_id, to_email, subject, sent_at) VALUES (?, 'm1', 'dr@smile.rw', 'Hi', ?)`, orgId, now());
+  insert(`INSERT INTO replies (sent_email_id, from_email, subject, body, received_at, uid) VALUES (?, 'dr@smile.rw', 'Re: Hi', 'Yes please', ?, 'u1')`, sent, now());
+  const followUp = proposeAction({ scope, task, kind: 'email', summary: 'Follow-up', details: { to: 'dr@smile.rw', subject: 'Re: Hi', body: 'Great, Thursday?' } });
+  assert.equal(followUp.route, 'auto');
+  assert.equal(one('SELECT status, decided_by FROM approvals WHERE id = ?', followUp.approvalId).decided_by, 'policy');
+  assert.equal(proposeAction({ scope, task, kind: 'other', summary: 'Owner: confirm the plan?', details: {} }).route, 'decline');
+  assert.equal(proposeAction({ scope, task, kind: 'payment', summary: 'Renew domain', details: { amount: 12 } }).route, 'owner');
+});
+
+test('CRM file: leads are appended once, de-duplicated by email or website', () => {
+  ws.ensureWorkspace(scope);
+  assert.equal(appendLead(scope, { company: 'Smile Dental', website: 'https://www.smile.rw', email: 'info@smile.rw', why_fit: 'no booking', source_url: 'https://smile.rw' }).added, true);
+  assert.equal(appendLead(scope, { company: 'Smile Dental Clinic', website: 'smile.rw', why_fit: 'dup', source_url: 'x' }).added, false);
+  assert.equal(appendLead(scope, { company: 'Other, Ltd "K"', email: 'hello@other.rw', why_fit: 'has "quotes", commas', source_url: 'x' }).added, true);
+  const rows = readLeads(scope);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].company, 'Other, Ltd "K"');
+  assert.equal(rows[1].status, 'new');
+});
+
+test('missions: targets resolve to their leader, teams become subagents, missions are recorded with a definition of done', () => {
+  assert.equal(leaderFor(scope, { type: 'team', id: team.id }).name, 'Atlas');
+  assert.equal(leaderFor(scope, { type: 'department', id: team.department_id }).name, 'Nova');
+  const subs = teamAsSubagents(atlas);
+  assert.deepEqual(Object.keys(subs).sort(), ['echo', 'scout']);
+  assert.equal(subs.scout.model, 'haiku');
+  assert.ok(subs.scout.tools.includes('WebSearch'));
+  assert.ok(!subs.echo.tools.includes('WebSearch'));
+  const nova = one(`SELECT * FROM agents WHERE name = 'Nova'`);
+  assert.deepEqual(Object.keys(teamAsSubagents(nova)).sort(), ['atlas', 'echo', 'scout'], 'a head gets the whole department');
+  const id = createMission({ scope, target: 'team:outreach', title: 'Find 5 leads', instructions: 'Go', dod: 'crm/leads.csv has 5 rows', createdBy: 'test' });
+  const m = one('SELECT * FROM tasks WHERE id = ?', id);
+  assert.equal(m.agent_id, atlas.id);
+  assert.equal(m.kind, 'mission');
+  assert.equal(m.dod, 'crm/leads.csv has 5 rows');
+  assert.equal(JSON.parse(m.target).type, 'team');
+  assert.throws(() => createMission({ scope, target: 'team:nowhere', title: 'x' }), /No team named/);
+});
