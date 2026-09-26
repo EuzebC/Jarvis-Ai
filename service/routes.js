@@ -25,6 +25,8 @@ import { undo as undoCommits, filesIn } from './brain/history.js';
 import { remoteStatus, startTunnel, stopTunnel, installCloudflared, defaultCommand } from './remote.js';
 import QRCode from 'qrcode';
 import { VOICES, DEFAULT_VOICE, DEFAULT_LIVE_MODEL } from './voice/live.js';
+import { readMap, signals, stageOf } from './brain/company.js';
+import { departmentFlow, orgFlow } from './brain/flow.js';
 import { LEVELS, approvalSentence } from './brain/policy.js';
 import { defaultVault, initVault, syncMinds, writeBriefing } from './connectors/obsidian.js';
 import { listBlocked, blockContact, unblock } from './optout.js';
@@ -196,6 +198,21 @@ route('POST', '/api/orgs', async (req, res) => {
 });
 
 route('GET', '/api/orgs/folder-suggestion', (req, res, ctx) => send(res, 200, { folder: suggestOrgFolder(ctx.query.get('name') || '') }));
+
+// The CEO's company map and the hard signals behind it.
+route('GET', '/api/orgs/:id/company-map', (req, res, ctx) => {
+  const org = mustExist('orgs', id(ctx.params.id), 'Organisation');
+  send(res, 200, { ...readMap(org.id), stage: stageOf(org.id), signals: signals(org.id) });
+});
+
+// The flow view: how the organisation or one department is wired, with live status.
+route('GET', '/api/flow', (req, res, ctx) => {
+  const dept = optId(ctx.query.get('dept'));
+  const org = optId(ctx.query.get('org'));
+  const f = dept ? departmentFlow(dept) : org ? orgFlow(org) : null;
+  if (!f) throw new HttpError(404, 'No organisation or department');
+  send(res, 200, f);
+});
 
 // Move an organisation to another folder on this PC (its files are copied over).
 route('PUT', '/api/orgs/:id/workspace', async (req, res, ctx) => {

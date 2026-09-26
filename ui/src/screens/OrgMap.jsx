@@ -60,6 +60,7 @@ function Room({ d }) {
 
 export default function OrgMap({ ctx }) {
   const org = useData(ctx.orgId ? `/api/orgs/${ctx.orgId}` : null, [ctx.orgId]);
+  const cmap = useData(ctx.orgId ? `/api/orgs/${ctx.orgId}/company-map` : null, [ctx.orgId]);
   const [adding, setAdding] = useState(false);
   const [folderEdit, setFolderEdit] = useState(null);
   const o = org.data;
@@ -194,7 +195,25 @@ export default function OrgMap({ ctx }) {
           <button type="button" className="btn grow" onClick={() => go(`/setup/${o.id}`)}>
             Jarvis: redesign
           </button>
+          <button type="button" className="btn grow" onClick={() => go('/flow')}>
+            Flow
+          </button>
         </div>
+        {cmap.data && (
+          <div className="col" style={{ gap: 6 }}>
+            <span className="label">▶ Company map · stage: {cmap.data.stage}</span>
+            {!cmap.data.updated_at && <span className="faint small">Jarvis assesses it on its next run.</span>}
+            {cmap.data.items.map((i) => (
+              <div key={i.key} className="row small" title={`${i.why}${i.evidence ? `\n${i.evidence}` : ''}${i.next ? `\nNext: ${i.next}` : ''}`}>
+                <span className="mono" style={{ width: 66, flexShrink: 0, color: i.status === 'ready' ? 'var(--ok)' : i.status === 'building' ? 'var(--p)' : i.status === 'missing' ? 'var(--warn)' : 'var(--faint)' }}>
+                  {i.status === 'n/a' ? 'N/A' : i.status.toUpperCase()}
+                </span>
+                <span className="grow ellipsis">{i.name}</span>
+                {i.department && <span className="faint mono ellipsis" style={{ maxWidth: 90 }}>{i.department}</span>}
+              </div>
+            ))}
+          </div>
+        )}
         <div className="col grow" style={{ gap: 4, overflow: 'hidden' }}>
           <span className="label">▶ Live</span>
           {o.feed.map((ev) => (

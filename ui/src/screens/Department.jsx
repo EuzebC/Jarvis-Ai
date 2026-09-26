@@ -169,6 +169,9 @@ export default function Department({ ctx, id }) {
           <a href="#/">HOME</a> › <a href="#/map">{d.org.name.toUpperCase()}</a> › <span className="here">{d.name.toUpperCase()}</span>
         </nav>
         <div className="row">
+          <button type="button" className="btn" onClick={() => (location.hash = `#/flow/${d.id}`)} title="How this department receives information, thinks and acts">
+            Flow
+          </button>
           <button type="button" className="btn" onClick={() => setModal('team')}>
             + Team
           </button>

@@ -14,6 +14,8 @@ import { whatsappConnected, recentWhatsapp } from '../connectors/whatsapp.js';
 import { proposeAction, contactHasReplied } from './proposals.js';
 import { KINDS } from './policy.js';
 import { scopeDir } from './workspace.js';
+import { STAGES, STATUSES, updateMap, mapText, stageOf } from './company.js';
+import { periodLabels } from '../agents.js';
 
 const text = (t) => ({ content: [{ type: 'text', text: String(t) }] });
 const csvCell = (v) => {
@@ -274,6 +276,59 @@ export function jarvisTools(ctx) {
     },
   );
 
+  const mapTool = tool(
+    'update_company_map',
+    canRestructure ? 'Updates the company map: for each capability its status (missing | building | ready | n/a), the evidence (file paths, live URLs, counts), the owner department and the next step. It drives every plan, so keep it truthful.' : 'Not available for your role.',
+    {
+      items: z.array(
+        z.object({
+          key: z.string().describe('offer | brand | website | payments | icp | pipeline | channels | sales | delivery | onboarding | finance | team | marketing | retention, or a new key'),
+          name: z.string().optional(),
+          stage: z.enum(STAGES).optional(),
+          status: z.enum(STATUSES).optional(),
+          evidence: z.string().optional(),
+          next: z.string().optional(),
+          department: z.string().optional(),
+        }),
+      ),
+    },
+    async ({ items }) => {
+      if (!canRestructure) return text('Refused: only Jarvis maintains the company map.');
+      const n = updateMap(orgId, items);
+      recordActivity({ scope, task, agent: agent.name, kind: 'map', text: `Company map updated (${n} item(s)); stage ${stageOf(orgId)}` });
+      return text(`Company map updated: ${n} item(s). Stage now: ${stageOf(orgId)}.`);
+    },
+  );
+  const readMapTool = tool('read_company_map', 'The company map: what a company needs and where this one stands.', {}, async () => text(orgId ? mapText(orgId) : 'The personal workspace has no company map.'));
+
+  const setGoal = tool(
+    'set_goal',
+    canRestructure ? 'Creates or replaces the goal of the organisation or of a department for a period (quarter | month | week). Use it to give every unit a number to move when goals are missing, vague or stale.' : 'Not available for your role.',
+    {
+      scope: z.enum(['org', 'department']),
+      department: z.string().optional().describe('Department name when scope is department'),
+      period: z.enum(['quarter', 'month', 'week']),
+      title: z.string().describe('Measurable, e.g. "3 paying clients (450,000 RWF)"'),
+      progress: z.number().int().min(0).max(100).optional(),
+    },
+    async (g) => {
+      if (!canRestructure) return text('Refused: only Jarvis sets goals.');
+      let scopeId = orgId;
+      if (g.scope === 'department') {
+        const dept = one('SELECT id FROM departments WHERE org_id = ? AND lower(name) = lower(?)', orgId, g.department ?? '');
+        if (!dept) return text(`No department named "${g.department}".`);
+        scopeId = dept.id;
+      }
+      const existing = one('SELECT id FROM goals WHERE org_id = ? AND scope = ? AND scope_id = ? AND period = ?', orgId, g.scope, scopeId, g.period);
+      const label = periodLabels()[g.period];
+      if (existing) run('UPDATE goals SET title = ?, period_label = ?, progress = COALESCE(?, progress), updated_at = ? WHERE id = ?', g.title.slice(0, 200), label, g.progress ?? null, now(), existing.id);
+      else insert('INSERT INTO goals (org_id, scope, scope_id, period, period_label, title, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', orgId, g.scope, scopeId, g.period, label, g.title.slice(0, 200), g.progress ?? 0, now(), now());
+      notify('goals', { orgId });
+      recordActivity({ scope, task, agent: agent.name, kind: 'goal', text: `Goal (${g.period}${g.department ? `, ${g.department}` : ''}): ${g.title}` });
+      return text(`${existing ? 'Goal replaced' : 'Goal set'} for ${g.scope === 'org' ? 'the organisation' : g.department} (${label}): ${g.title}`);
+    },
+  );
+
   const missions = tool('list_missions', 'Open and recent missions in this organisation.', {}, async () => {
     const rows = all(
       `SELECT t.id, t.title, t.status, t.live_status, a.name AS agent FROM tasks t LEFT JOIN agents a ON a.id = t.agent_id WHERE t.org_id IS ? AND t.kind = 'mission' ORDER BY (t.status IN ('queued','running')) DESC, t.id DESC LIMIT 25`,
@@ -282,5 +337,5 @@ export function jarvisTools(ctx) {
     return text(rows.map((r) => `#${r.id} [${r.status}] ${r.title}${r.agent ? ` (${r.agent})` : ''}${r.live_status ? ` — ${r.live_status}` : ''}`).join('\n') || 'None.');
   });
 
-  return createSdkMcpServer({ name: 'jarvis', version: '2.0.0', tools: [propose, addLeadTool, checkContact, delegate, progress, kpi, goal, remember, replies, missions, createDepartment, createTeam] });
+  return createSdkMcpServer({ name: 'jarvis', version: '2.0.0', tools: [propose, addLeadTool, checkContact, delegate, progress, kpi, goal, remember, replies, missions, createDepartment, createTeam, mapTool, readMapTool, setGoal] });
 }

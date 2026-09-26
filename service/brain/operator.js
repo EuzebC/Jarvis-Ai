@@ -15,11 +15,14 @@ import { readLeads } from './tools.js';
 import { approvalSentence } from './policy.js';
 import { whatsappConnected } from '../connectors/whatsapp.js';
 import { waitingForConnectors } from '../outbox.js';
+import { mapText, signalsText, stageOf, readMap } from './company.js';
+import { periodLabels } from '../agents.js';
 
 const runningFor = new Set();
 const today = () => new Date().toISOString().slice(0, 10);
 const MODES = {
-  morning: { model: 'opus', maxTurns: 40, budget: 4 },
+  strategy: { model: 'opus', maxTurns: 60, budget: 7 },
+  morning: { model: 'opus', maxTurns: 45, budget: 5 },
   midday: { model: 'sonnet', maxTurns: 30, budget: 2 },
   event: { model: 'sonnet', maxTurns: 25, budget: 1.5 },
   review: { model: 'sonnet', maxTurns: 25, budget: 1.5 },
@@ -61,29 +64,44 @@ export function situation(orgId) {
 }
 
 function prompt(orgId, mode, reason) {
+  const org = one('SELECT name FROM orgs WHERE id = ?', orgId);
   const intro = {
-    morning: 'It is the start of the working day. Set the plan for today.',
-    midday: 'Mid-day check. Keep the organisation moving.',
-    event: `Something happened: ${reason}. React to it.`,
-    review: 'End of day. Review what happened and prepare tomorrow.',
+    strategy: 'Weekly strategy review. Look at the whole company as its CEO: which stage it is at, what blocked revenue this week, what the structure is missing, what to build next, and set or correct the goals with set_goal.',
+    morning: 'It is the start of the working day. Decide what the company builds and does today.',
+    midday: 'Cycle check. The teams are free or nearly free: give them the next most valuable work.',
+    event: `Something happened: ${reason}. React to it, then keep the company moving.`,
+    review: 'End of day. Review what was delivered, what failed and why, update the company map, and line up tomorrow.',
   }[mode];
+  const stage = stageOf(orgId);
+  const assessed = Boolean(readMap(orgId).updated_at);
   return `${intro}
+
+You are the CEO of ${org?.name ?? 'this organisation'}. Nobody tells you what the company needs: you know what a company needs in order to run and grow, you see what is missing, and you build it. The owner never has to remind you that there is no website, no way to get paid, no follow-up sequence or nobody owning delivery.
 
 CURRENT STATE:
 ${situation(orgId)}
 
+COMPANY MAP (what every company needs, and where this one stands; current stage: ${stage}):
+${mapText(orgId)}
+
+HARD SIGNALS (facts gathered from the folder and the connectors):
+${signalsText(orgId)}
+
 MEMORY.md:
 ${readMemory({ orgId }).slice(0, 5000)}
 
-YOUR JOB AS OPERATOR:
-1. Compare the state with the goals and KPIs. Find the biggest gap that moves revenue or a customer forward.
-2. Create missions with the delegate tool for the departments/teams that own that work: 2 to 5 missions, each with complete instructions and a measurable definition of done (file names, counts, actions to propose). Do not create missions that duplicate open ones. Prefer missions that end in actions (messages sent, leads contacted, products built, deliverables made) over more research.
-3. If no existing department or team owns work the goals need (a product to build, a market to serve, support to run), create it with create_department or create_team and delegate to it in the same run. Keep the structure lean: one new unit at a time, with a clear KPI.
-4. If a mission failed or was sent back, decide whether to re-run it differently, split it, or drop it.
-5. Update goal progress with update_goal where the facts justify it.
-6. Write journal/plan-${today()}.md (overwrite if it exists): today's objectives, the missions you created (with ids), risks, and what the owner should look at. Keep it under 300 words.
-7. Finish with a short spoken-style summary for the owner (3 to 5 sentences): what the organisation is doing today and what needs their attention. No questions.
-Rules: never ask the owner what to do. ${approvalSentence(getSetting('approval_level', 'payments'))} You run in a loop: as soon as missions are delivered you are woken again, so always leave the teams with the next concrete work. Messages wait in the Outbox while a connector is missing and go out by themselves once the owner adds the key: never plan manual sending (send sheets, click-to-send links, "the owner sends by hand"), never ask the owner to send anything, and do not propose the same recipients again. Use the time to build what will be delivered after the first replies (offers, templates, products, follow-up sequences) and to widen the pipeline.`;
+HOW YOU THINK, EVERY RUN:
+1. Foundations before outreach: an offer with prices, a website that is actually live, a way to get paid (invoice + payment details), a connected channel. If any of these is MISSING or unproven, this run builds or proves it (a mission with a definition of done that names the file, URL or number), in parallel with pipeline work, never instead of thinking about it.
+2. Then pipeline and sales: verified leads in the CRM, first contacts proposed, follow-up sequences, proposals, closing.
+3. Then delivery and success: what a paying client receives, onboarding, support, feedback, case studies.
+4. Then growth: presence (social, listings, reviews), retention, referrals, new products, new markets.
+5. Ownership: every capability needs a department or team that owns it. If none exists, create it now with create_department or create_team (lean: one unit, clear KPI) and delegate to it in this same run.
+6. Keep the map truthful with update_company_map${assessed ? '' : ' (it has NEVER been assessed: assess every item now from the signals and the folder before anything else)'}: mark READY only with evidence (a file path, a live URL, a count), BUILDING with the mission id, MISSING with the next step and the owner department. Never leave "unknown".
+7. Missions: 2 to 5 per run, each with complete instructions and a measurable definition of done. Do not duplicate open missions; do not re-propose the same recipients. If a mission failed or was sent back, re-run it differently, split it, or drop it.
+8. Goals: when goals are missing, vague or stale, set them with set_goal (quarter, month, week) so every department has a number to move; update progress with update_goal only where facts justify it.
+9. Write journal/plan-${today()}.md (overwrite if it exists): the stage, today's objectives, the missions you created (ids), what you decided to build because it was missing, risks. Under 300 words.
+10. Finish with a short spoken-style summary for the owner (3 to 5 sentences): what the company is building and doing today, what you noticed was missing and how you are fixing it, and the one thing only they can do (a key, a payment detail) if any. No questions.
+Rules: never ask the owner what to do. ${approvalSentence(getSetting('approval_level', 'payments'))} You run in a loop: as soon as missions are delivered you are woken again, so always leave the teams with the next concrete work. Messages wait in the Outbox while a connector is missing and go out by themselves once the owner adds the key: never plan manual sending, never ask the owner to send anything. Use the time to build what will be delivered after the first replies and to widen the pipeline.`;
 }
 
 export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) {
@@ -99,7 +117,7 @@ export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) 
     `INSERT INTO tasks (org_id, agent_id, title, instructions, priority, status, created_by, kind, started_at, created_at) VALUES (?, ?, ?, ?, 100, 'running', 'Jarvis', 'operator', ?, ?)`,
     orgId,
     jarvis.id,
-    { morning: "Jarvis: today's plan", midday: 'Jarvis: mid-day check', event: `Jarvis: ${reason || 'event'}`, review: 'Jarvis: end-of-day review' }[mode],
+    { strategy: 'Jarvis: weekly strategy', morning: "Jarvis: today's plan", midday: 'Jarvis: cycle', event: `Jarvis: ${reason || 'event'}`, review: 'Jarvis: end-of-day review' }[mode],
     reason,
     now(),
     now(),
@@ -119,7 +137,7 @@ export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) 
     const res = await runSession({
       cwd: root,
       prompt: prompt(orgId, mode, reason),
-      append: 'You are Jarvis, the operator who runs this organisation autonomously for its owner. You plan, delegate, and keep the organisation moving. You never ask the owner questions.',
+      append: 'You are Jarvis, the CEO who runs this organisation autonomously for its owner. You know what a company needs, you notice what is missing, you build it, you plan, delegate and keep the organisation moving. You never ask the owner questions.',
       model: cfg.model,
       maxTurns: cfg.maxTurns,
       maxBudgetUsd: cfg.budget,
@@ -141,6 +159,10 @@ export async function runOperator(orgId, { mode = 'midday', reason = '' } = {}) 
     if (res.ok) {
       setSetting(`operator:${orgId}:plan`, JSON.stringify({ mode, at: now(), text: summary }));
       setSetting(`operator:${orgId}:last_${mode}`, today());
+      if (mode === 'strategy') {
+        setSetting(`operator:${orgId}:last_morning`, today()); // the strategy run is the morning run of that day
+        setSetting(`operator:${orgId}:last_strategy_week`, weekLabel());
+      }
       setSetting(`operator:${orgId}:last_cycle_at`, now()); // any successful run counts as a cycle
       const planFile = path.join(scopeDir(scope), 'journal', `plan-${today()}.md`);
       if (mode !== 'review' && !fs.existsSync(planFile)) fs.writeFileSync(planFile, `# Plan ${today()}\n\n${summary}\n`);
@@ -165,6 +187,7 @@ export const currentPlan = (orgId) => {
 // The loop: a morning plan after 7:00, then a new cycle every two hours (7:00–22:00) whenever the
 // organisation has fewer than two open missions, an end-of-day review after 19:00, and a wake-up
 // whenever a mission is delivered. Agents therefore always get new work. Called every few minutes.
+const weekLabel = () => `${new Date().getFullYear()}-${periodLabels().week}`;
 const CYCLE_MS = 2 * 60 * 60_000; // a fresh look while missions are still running
 const IDLE_MS = 15 * 60_000; // never leave the teams idle longer than this during the day
 export async function operatorTick() {
@@ -175,7 +198,7 @@ export async function operatorTick() {
     const last = (mode) => getSetting(`operator:${org.id}:last_${mode}`, '');
     const open = one(`SELECT COUNT(*) AS n FROM tasks WHERE org_id = ? AND kind = 'mission' AND status IN ('queued','running')`, org.id).n;
     const lastCycle = Number(getSetting(`operator:${org.id}:last_cycle_at`, '0'));
-    if (h >= 7 && last('morning') !== today()) await runOperator(org.id, { mode: 'morning' });
+    if (h >= 7 && last('morning') !== today()) await runOperator(org.id, { mode: getSetting(`operator:${org.id}:last_strategy_week`, '') !== weekLabel() ? 'strategy' : 'morning' });
     else if (h >= 19 && last('review') !== today()) await runOperator(org.id, { mode: 'review' });
     else if (h >= 7 && h < 22 && ((open === 0 && now() - lastCycle > IDLE_MS) || (open < 2 && now() - lastCycle > CYCLE_MS))) {
       setSetting(`operator:${org.id}:last_cycle_at`, now());

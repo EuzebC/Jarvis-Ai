@@ -15,6 +15,7 @@ import Mind from './screens/Mind.jsx';
 import Settings from './screens/Settings.jsx';
 import { NewOrg, StructureReview } from './screens/Setup.jsx';
 import Project from './screens/Project.jsx';
+import Flow from './screens/Flow.jsx';
 
 const desktop = typeof window !== 'undefined' && window.jarvisDesktop;
 export const go = (path) => {
@@ -397,6 +398,7 @@ export default function App() {
   else if (v === 'task') screen = <TaskView id={route.id} />;
   else if (v === 'project') screen = <Project ctx={ctx} id={route.id} />;
   else if (v === 'approvals') screen = <Approvals ctx={ctx} />;
+  else if (v === 'flow') screen = <Flow ctx={ctx} deptId={route.id} />;
   else if (v === 'mind') screen = <Mind ctx={ctx} />;
   else if (v === 'settings') screen = <Settings ctx={ctx} reload={settings.reload} focus={route.param} />;
   else screen = workspace === 'personal' ? <PersonalHome ctx={ctx} /> : <OrgHome ctx={ctx} />;
@@ -440,6 +442,7 @@ export default function App() {
         <nav className="navicons" aria-label="Sections">
           {nav('home', '/', 'Home')}
           {workspace === 'org' && nav('map', '/map', 'Organisation map')}
+          {workspace === 'org' && nav('flow', '/flow', 'Flow: how it works')}
           {nav('approvals', '/approvals', 'Outbox', pending > 0 && <span className="badge">{pending}</span>)}
           {nav('mind', '/mind', 'Mind: memories and files')}
           {nav('settings', '/settings', 'Settings')}

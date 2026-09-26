@@ -8,6 +8,7 @@ const PATHS = {
   mind: 'M12 4a4 4 0 0 0-4 4 4 4 0 0 0-3 6 4 4 0 0 0 4 5h6a4 4 0 0 0 4-5 4 4 0 0 0-3-6 4 4 0 0 0-4-4zM12 8v11',
   settings: 'M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4',
   mic: 'M9 3h6v11H9zM5 11a7 7 0 0 0 14 0M12 18v3',
+  flow: 'M3 5h5v5H3zM16 3h5v5h-5zM16 16h5v5h-5zM8 7.5h4M12 7.5v-2h4M12 7.5v11h4',
   plus: 'M12 5v14M5 12h14',
   close: 'M6 6l12 12M18 6L6 18',
   download: 'M12 4v11M7 10l5 5 5-5M5 20h14',

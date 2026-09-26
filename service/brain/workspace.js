@@ -7,6 +7,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { one, all, run, getSetting } from '../db.js';
 import { approvalSentence } from './policy.js';
+import { mapText, stageOf } from './company.js';
 import { listBlocked } from '../optout.js';
 import { periodLabels } from '../agents.js';
 
@@ -132,6 +133,7 @@ export function claudeMd(scope) {
     const goals = all(`SELECT * FROM goals WHERE scope = 'org' AND scope_id = ?`, scope.orgId);
     if (goals.length) parts.push('## Company goals', ...goals.map((g) => `- (${g.period_label}) ${g.title} — ${bar(g.progress)}`), '');
     parts.push('## Structure', structureSection(scope.orgId));
+    parts.push(`## Company map (stage: ${stageOf(scope.orgId)})`, mapText(scope.orgId), 'Jarvis keeps this map; when your mission makes something READY, say so in your report with the evidence.', '');
     const blocked = listBlocked(scope.orgId);
     parts.push('## Do-not-contact list', blocked.length ? blocked.map((b) => `- ${b.email}`).join('\n') : '(empty)', 'Jarvis checks every outgoing email against this list and adds opt-outs automatically. Never contact these people; never ask the owner about this list.', '');
   } else {
@@ -170,7 +172,8 @@ export function claudeMd(scope) {
     '- `update_kpi`, `update_goal` — only for numbers you actually moved.',
     '- `remember` — add a lasting fact to MEMORY.md.',
     '- `read_replies` — recent replies to our emails and WhatsApp messages.',
-    '- `create_department`, `create_team` — Jarvis (the Operator) grows the organisation when the goals need work nobody owns yet.',
+    '- `create_department`, `create_team`, `set_goal`, `update_company_map` — Jarvis (the CEO loop) grows the organisation, sets goals and keeps the company map.',
+    '- `read_company_map` — where the company stands on every capability.',
   );
   return parts.filter((x) => x !== null && x !== undefined).join('\n');
 }

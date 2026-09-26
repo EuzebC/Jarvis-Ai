@@ -1,5 +1,5 @@
 // Opens the running HUD in a headless browser, visits the main screens, reports console errors and
-// saves screenshots. Usage: node scripts/smoke-hud.mjs [outDir]
+// saves screenshots. Usage: node scripts/smoke-hud.mjs [outDir] [/#/route ...]
 import path from 'node:path';
 import { chromium } from 'playwright';
 
@@ -18,12 +18,16 @@ try {
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => m.type() === 'error' && errors.push(`console: ${m.text().slice(0, 200)}`));
   await fetch(`${B}/api/settings`, { method: 'PUT', headers: H, body: JSON.stringify({ core: 'face' }) });
-  const shots = [
-    ['home-face', '/#/'],
-    ['outbox', '/#/approvals'],
-    ['settings-whatsapp', '/#/settings/whatsapp'],
-    ['map', '/#/map'],
-  ];
+  const shots =
+    process.argv.length > 3
+      ? process.argv.slice(3).map((r) => [r.replace(/^\/#\//, '').replace(/[^a-z0-9]+/gi, '-') || 'home', r])
+      : [
+          ['home-face', '/#/'],
+          ['outbox', '/#/approvals'],
+          ['settings-whatsapp', '/#/settings/whatsapp'],
+          ['map', '/#/map'],
+          ['flow', '/#/flow'],
+        ];
   for (const [name, route] of shots) {
     await page.goto(`${B}${route}`);
     await page.waitForTimeout(2500);

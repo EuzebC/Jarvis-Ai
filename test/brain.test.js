@@ -13,6 +13,8 @@ const wa = await import('../service/connectors/whatsapp.js');
 const { migratePendingActions, requeueForConnector } = await import('../service/outbox.js');
 const { releaseReviewed } = await import('../service/brain/proposals.js');
 const await_history = await import('../service/brain/history.js');
+const company = await import('../service/brain/company.js');
+const flowMod = await import('../service/brain/flow.js');
 const { run: dbRun } = await import('../service/db.js');
 const { proposeAction } = await import('../service/brain/proposals.js');
 const { appendLead, readLeads } = await import('../service/brain/tools.js');
@@ -264,4 +266,35 @@ test('history: a mission leaves git snapshots and undo restores the files in a n
   assert.equal(fs.existsSync(path.join(dir, 'report.md')), false);
   assert.equal(fs.readFileSync(path.join(dir, 'existing.md'), 'utf8'), 'owner file');
   assert.equal(fs.readFileSync(path.join(dir, 'later.md'), 'utf8'), 'work after the mission stays');
+});
+
+test('company map: the blueprint carries statuses, updates persist to a file, the stage follows the first gap', () => {
+  const m = company.readMap(orgId);
+  assert.equal(m.items.length, company.BLUEPRINT.length);
+  assert.equal(m.items[0].status, 'unknown');
+  assert.equal(company.updateMap(orgId, [{ key: 'offer', status: 'ready', evidence: 'profile lists prices' }, { key: 'website', status: 'missing', next: 'mission to Web Build', department: 'Sales' }, { key: 'custom-thing', name: 'Custom capability', status: 'building', stage: 'grow' }]), 3);
+  const after = company.readMap(orgId);
+  assert.equal(after.items.find((i) => i.key === 'offer').status, 'ready');
+  assert.equal(after.items.find((i) => i.key === 'custom-thing').name, 'Custom capability');
+  assert.equal(company.stageOf(orgId), 'foundation');
+  assert.match(company.mapText(orgId), /\[MISSING\] Website \(owner: Sales\)/);
+  assert.ok(fs.existsSync(path.join(ws.orgDir(orgId), 'journal', 'company-map.md')));
+  const sig = company.signals(orgId);
+  assert.equal(typeof sig.leads.total, 'number');
+  assert.match(company.signalsText(orgId), /Connectors:/);
+});
+
+test('flow: organisation and department graphs have every layer, and every edge joins two nodes', () => {
+  const dept = one('SELECT id FROM departments WHERE org_id = ?', orgId);
+  for (const f of [flowMod.orgFlow(orgId), flowMod.departmentFlow(dept.id)]) {
+    const ids = new Set(f.nodes.map((n) => n.id));
+    for (const type of ['input', 'brain', 'team', 'process', 'output', 'connector']) assert.ok(f.nodes.some((n) => n.type === type), `${type} node`);
+    for (const e of f.edges) {
+      assert.ok(ids.has(e.from), `edge from ${e.from}`);
+      assert.ok(ids.has(e.to), `edge to ${e.to}`);
+    }
+    assert.equal(f.columns.length, 6);
+  }
+  assert.ok(flowMod.departmentFlow(dept.id).nodes.some((n) => n.id.startsWith('t:')));
+  assert.equal(flowMod.departmentFlow(999999), null);
 });
