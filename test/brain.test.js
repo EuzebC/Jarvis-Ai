@@ -18,7 +18,7 @@ const flowMod = await import('../service/brain/flow.js');
 const { run: dbRun } = await import('../service/db.js');
 const { proposeAction } = await import('../service/brain/proposals.js');
 const { appendLead, readLeads } = await import('../service/brain/tools.js');
-const { createMission, leaderFor, teamAsSubagents } = await import('../service/brain/missions.js');
+const { createMission, leaderFor, teamAsSubagents, quickChecks } = await import('../service/brain/missions.js');
 const { applyDraft } = await import('../service/structure.js');
 const { ensureOrgJarvis } = await import('../service/agents.js');
 
@@ -297,4 +297,13 @@ test('flow: organisation and department graphs have every layer, and every edge 
   }
   assert.ok(flowMod.departmentFlow(dept.id).nodes.some((n) => n.id.startsWith('t:')));
   assert.equal(flowMod.departmentFlow(999999), null);
+});
+
+test('verification: technology names are not files, and bare file names are found inside project folders', () => {
+  const root = fs.mkdtempSync(path.join(process.env.JARVIS_DATA_DIR, 'qc-'));
+  fs.mkdirSync(path.join(root, 'projects', 'site'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'projects', 'site', 'README.md'), '# Site\nRun: npm run dev');
+  const task = { id: -1, dod: 'Build the site in Next.js with a README.md that says how to run it; outputs/summary.md lists the pages.' };
+  const problems = quickChecks(root, task, []);
+  assert.deepEqual(problems, ['outputs/summary.md does not exist.']);
 });

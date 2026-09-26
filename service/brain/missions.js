@@ -176,11 +176,40 @@ function registerFiles(scope, taskId, files) {
 }
 
 // Cheap, deterministic checks first: files named in the definition of done must exist with real content.
-function quickChecks(root, task, files) {
+// Technology names that look like files but are not ("Next.js", "Vue.js").
+const TECH_NAME = /^(?:next|node|vite|react|vue|three|express|tailwind|angular|nuxt|svelte|jquery|d3|p5|chart|alpine|htmx)\.js$/i;
+
+// A bare file name in a definition of done ("README.md") may live inside a project folder.
+function findFile(root, name, depth = 4) {
+  const walk = (dir, d) => {
+    if (d > depth) return null;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+      const abs = path.join(dir, e.name);
+      if (e.isFile() && e.name.toLowerCase() === name.toLowerCase()) return abs;
+      if (e.isDirectory()) {
+        const hit = walk(abs, d + 1);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(root, 0);
+}
+
+export function quickChecks(root, task, files) {
   const problems = [];
   const named = String(task.dod ?? '').match(/[\w./-]+\.(?:csv|md|txt|json|html?|py|js|ts|xlsx?|docx?|pdf)/gi) ?? [];
   for (const rel of new Set(named)) {
-    const abs = path.join(root, rel);
+    if (TECH_NAME.test(rel)) continue;
+    let abs = path.join(root, rel);
+    if (!fs.existsSync(abs) && !rel.includes('/')) abs = findFile(root, rel) ?? abs;
     if (!fs.existsSync(abs)) {
       problems.push(`${rel} does not exist.`);
       continue;
